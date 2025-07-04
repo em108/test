@@ -34,8 +34,7 @@ jobs:
 
     steps:
       - name: Enable long paths in Git
-        run: |
-          git config --system core.longpaths true
+        run: git config --system core.longpaths true
 
       - name: Enable long paths in Windows
         shell: powershell
@@ -56,7 +55,6 @@ jobs:
       - name: Install WebView2
         shell: powershell
         run: |
-          # Download and install WebView2 Runtime
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "MicrosoftEdgeWebview2Setup.exe"
           Start-Process -FilePath "MicrosoftEdgeWebview2Setup.exe" -ArgumentList "/silent", "/install" -Wait
 
@@ -67,15 +65,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Bun
-        shell: powershell
-        run: |
-          irm bun.sh/install.ps1 | iex
-
-      - name: Add Bun to PATH
-        shell: powershell
-        run: |
-          $bunPath = "$env:USERPROFILE\.bun\bin"
-          echo "$bunPath" >> $env:GITHUB_PATH
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -84,171 +76,43 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: claudia
-        shell: powershell
-        run: |
-          bun install
+        run: bun install
 
-      - name: Fix icon format issue
+      # --- START: THE FIX ---
+      # The original "Fix icon format issue" step was incorrect.
+      # This new step correctly modifies the tauri.conf.json in the runner
+      # to include the required .ico file for the Windows build.
+      - name: Update tauri.conf.json for Windows build
         working-directory: claudia
         shell: powershell
         run: |
-          # Verify existing icons
-          Write-Host "Checking existing icons..."
-          if (Test-Path "src-tauri\icons") {
-            $iconFiles = Get-ChildItem "src-tauri\icons" -Name
-            Write-Host "Found icon files: $($iconFiles -join ', ')"
-            
-            # Check if icon.ico exists and is valid
-            if (Test-Path "src-tauri\icons\icon.ico") {
-              $iconSize = (Get-Item "src-tauri\icons\icon.ico").Length
-              Write-Host "Found icon.ico with size: $iconSize bytes"
-              
-              # Verify it's a valid ICO file
-              $iconBytes = [System.IO.File]::ReadAllBytes("src-tauri\icons\icon.ico")
-              if ($iconBytes.Length -gt 3 -and $iconBytes[0] -eq 0x00 -and $iconBytes[1] -eq 0x00 -and $iconBytes[2] -eq 0x01 -and $iconBytes[3] -eq 0x00) {
-                Write-Host "icon.ico format verification passed"
-              } else {
-                Write-Host "icon.ico format may be invalid, recreating..."
-                Remove-Item "src-tauri\icons\icon.ico" -Force
-              }
-            }
-          }
+          $configFile = "src-tauri/tauri.conf.json"
+          Write-Host "Reading configuration from $configFile"
           
-          # If icon.ico doesn't exist or is invalid, create/download a new one
-          if (!(Test-Path "src-tauri\icons\icon.ico")) {
-            Write-Host "Creating/downloading icon.ico..."
-            
-            # First try to use existing icon.png if available
-            if (Test-Path "src-tauri\icons\icon.png") {
-              Write-Host "Using existing icon.png to generate icon.ico"
-              try {
-                # Use Tauri's icon generation
-                bun run tauri icon "src-tauri\icons\icon.png" --output "src-tauri\icons"
-                Write-Host "Generated icon.ico from icon.png"
-              } catch {
-                Write-Host "Tauri icon generation failed, trying alternative..."
-              }
-            }
-            
-            # If still no icon.ico, download a working one
-            if (!(Test-Path "src-tauri\icons\icon.ico")) {
-              Write-Host "Downloading working icon.ico..."
-              try {
-                $iconUrl = "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tooling/cli/templates/app/src-tauri/icons/icon.ico"
-                Invoke-WebRequest -Uri $iconUrl -OutFile "src-tauri\icons\icon.ico" -UseBasicParsing
-                Write-Host "Downloaded working icon.ico"
-              } catch {
-                Write-Host "Download failed, creating basic icon..."
-                
-                # Create a minimal but valid ICO file
-                $icoBytes = @(
-                  # ICO Header
-                  0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x20, 0x20, 0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x00, 0x10, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00
-                )
-                
-                # Add BITMAP header
-                $bmpHeader = @(
-                  0x28, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                )
-                
-                # Create simple pixel data (32x32 blue square)
-                $pixelData = @()
-                for ($i = 0; $i -lt 1024; $i++) {
-                  if ($i % 4 -eq 0) { $pixelData += 0xFF } # Blue
-                  elseif ($i % 4 -eq 1) { $pixelData += 0x00 } # Green  
-                  elseif ($i % 4 -eq 2) { $pixelData += 0x00 } # Red
-                  else { $pixelData += 0xFF } # Alpha
-                }
-                
-                # AND mask (32x32 / 8 = 128 bytes)
-                $andMask = @(0x00) * 128
-                
-                $allBytes = $icoBytes + $bmpHeader + $pixelData + $andMask
-                [System.IO.File]::WriteAllBytes("src-tauri\icons\icon.ico", [byte[]]$allBytes)
-                Write-Host "Created basic icon.ico"
-              }
-            }
-          }
+          # Read the JSON file and convert it to a PowerShell object
+          $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
           
-          # Final verification
-          if (Test-Path "src-tauri\icons\icon.ico") {
-            $iconSize = (Get-Item "src-tauri\icons\icon.ico").Length
-            Write-Host "Final icon.ico verification: Size = $iconSize bytes"
+          # Add the required icon file to the icon array if it doesn't already exist
+          if ($config.bundle.icon -notcontains "icons/icon.ico") {
+            Write-Host "Adding 'icons/icon.ico' to the bundle icon list."
+            $config.bundle.icon += "icons/icon.ico"
           } else {
-            Write-Host "Error: Failed to create icon.ico"
-            exit 1
+            Write-Host "'icons/icon.ico' is already present. No changes needed."
           }
           
-          # Also ensure we have the right configuration in tauri.conf.json
-          Write-Host "Checking tauri.conf.json for icon configuration..."
-          if (Test-Path "src-tauri\tauri.conf.json") {
-            $config = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
-            Write-Host "Current bundle identifier: $($config.bundle.identifier)"
-            
-            # Check if icon path is correctly set
-            if ($config.bundle.icon) {
-              Write-Host "Icon path in config: $($config.bundle.icon -join ', ')"
-            } else {
-              Write-Host "No icon path found in bundle config"
-            }
-          }
-
-      - name: Configure Tauri for bundling
-        working-directory: claudia
-        shell: powershell
-        run: |
-          # Check and potentially fix tauri.conf.json
-          if (Test-Path "src-tauri\tauri.conf.json") {
-            $configPath = "src-tauri\tauri.conf.json"
-            $config = Get-Content $configPath -Raw | ConvertFrom-Json
-            
-            Write-Host "Checking bundle configuration..."
-            
-            # Ensure bundle.icon is properly configured
-            if (-not $config.bundle) {
-              $config | Add-Member -Name "bundle" -Value @{} -MemberType NoteProperty
-            }
-            
-            if (-not $config.bundle.icon) {
-              $config.bundle | Add-Member -Name "icon" -Value @("icons/icon.ico", "icons/icon.png") -MemberType NoteProperty
-              Write-Host "Added icon configuration to bundle"
-            } else {
-              Write-Host "Current icon config: $($config.bundle.icon -join ', ')"
-            }
-            
-            # Ensure we have the right bundle identifier
-            if (-not $config.bundle.identifier) {
-              $config.bundle | Add-Member -Name "identifier" -Value "com.asterisk.claudia" -MemberType NoteProperty
-              Write-Host "Added bundle identifier"
-            }
-            
-            # Save the updated configuration
-            $config | ConvertTo-Json -Depth 10 | Set-Content $configPath
-            Write-Host "Updated tauri.conf.json"
-          }
+          # Convert the object back to a JSON string and save it.
+          # Using -Depth 5 is a safe choice for nested config files.
+          $config | ConvertTo-Json -Depth 5 | Set-Content -Path $configFile
           
-          # List all icon files to verify they exist
-          Write-Host "Available icon files:"
-          Get-ChildItem "src-tauri\icons" -Name | ForEach-Object { Write-Host "  - $_" }
+          Write-Host "Successfully updated $configFile. New content:"
+          Get-Content $configFile
+      # --- END: THE FIX ---
 
       - name: Build Tauri application
         working-directory: claudia
-        shell: powershell
         env:
           RUST_BACKTRACE: 1
-        run: |
-          # Build without bundling first to ensure compilation works
-          Write-Host "Building Tauri application (executable only)..."
-          bun run tauri build --target ${{ matrix.target }} --no-bundle
-          
-          # Then create bundles separately with more verbose output
-          Write-Host "Creating MSI bundle..."
-          try {
-            bun run tauri build --target ${{ matrix.target }} --bundles msi
-          } catch {
-            Write-Host "MSI bundle creation failed, trying without specific bundle type..."
-            bun run tauri build --target ${{ matrix.target }}
-          }
+        run: bun run tauri build --target ${{ matrix.target }}
 
       - name: Archive executable
         uses: actions/upload-artifact@v4
