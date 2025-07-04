@@ -88,52 +88,76 @@ jobs:
         run: |
           bun install
 
-      - name: Generate missing icons
+      - name: Fix icon format issue
         working-directory: claudia
         shell: powershell
         run: |
+          # Install ImageMagick for proper icon conversion
+          Write-Host "Installing ImageMagick..."
+          choco install imagemagick -y
+          
           # Create icons directory if it doesn't exist
           if (!(Test-Path "src-tauri\icons")) {
             New-Item -ItemType Directory -Path "src-tauri\icons" -Force
           }
           
-          # Check if icon.ico exists, if not, create a simple one or use Tauri's icon generation
-          if (!(Test-Path "src-tauri\icons\icon.ico")) {
-            Write-Host "icon.ico not found, generating icons..."
-            
-            # Check if there's a PNG icon we can use as source
-            $pngIcon = Get-ChildItem "src-tauri\icons\*.png" | Select-Object -First 1
-            
-            if ($pngIcon) {
-              Write-Host "Found PNG icon: $($pngIcon.Name), using it as source"
-              # Use Tauri's icon generation
-              bun run tauri icon "$($pngIcon.FullName)"
-            } else {
-              Write-Host "No PNG icon found, creating a default icon..."
-              # Create a simple default icon using PowerShell and .NET
-              Add-Type -AssemblyName System.Drawing
-              
-              # Create a simple 32x32 icon
-              $bitmap = New-Object System.Drawing.Bitmap(32, 32)
-              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-              $graphics.FillRectangle([System.Drawing.Brushes]::Blue, 0, 0, 32, 32)
-              $graphics.FillRectangle([System.Drawing.Brushes]::White, 8, 8, 16, 16)
-              $graphics.Dispose()
-              
-              # Save as PNG first
-              $bitmap.Save("src-tauri\icons\icon.png", [System.Drawing.Imaging.ImageFormat]::Png)
-              $bitmap.Dispose()
-              
-              # Now generate all icon formats from this PNG
-              bun run tauri icon "src-tauri\icons\icon.png"
-            }
+          # Remove any existing problematic icon files
+          if (Test-Path "src-tauri\icons\icon.ico") {
+            Write-Host "Removing existing icon.ico..."
+            Remove-Item "src-tauri\icons\icon.ico" -Force
           }
           
-          # Verify the icon was created
-          if (Test-Path "src-tauri\icons\icon.ico") {
-            Write-Host "icon.ico successfully created/found"
+          # Check if there's a PNG icon we can use as source
+          $pngIcon = Get-ChildItem "src-tauri\icons\*.png" | Select-Object -First 1
+          
+          if ($pngIcon) {
+            Write-Host "Found PNG icon: $($pngIcon.Name), using it as source"
+            $sourcePng = $pngIcon.FullName
           } else {
-            Write-Host "Warning: icon.ico still not found"
+            Write-Host "No PNG icon found, creating a default one..."
+            # Create a simple default icon using PowerShell and .NET
+            Add-Type -AssemblyName System.Drawing
+            
+            # Create a simple 1024x1024 icon for better quality
+            $bitmap = New-Object System.Drawing.Bitmap(1024, 1024)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.FillRectangle([System.Drawing.Brushes]::DodgerBlue, 0, 0, 1024, 1024)
+            $graphics.FillRectangle([System.Drawing.Brushes]::White, 256, 256, 512, 512)
+            $graphics.Dispose()
+            
+            # Save as PNG
+            $sourcePng = "src-tauri\icons\source.png"
+            $bitmap.Save($sourcePng, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bitmap.Dispose()
+            Write-Host "Created default PNG icon at: $sourcePng"
+          }
+          
+          # Use ImageMagick to create a proper ICO file with multiple sizes
+          Write-Host "Converting PNG to ICO format using ImageMagick..."
+          $iconPath = "src-tauri\icons\icon.ico"
+          
+          # Create ICO with multiple sizes (16x16, 32x32, 48x48, 256x256)
+          & magick convert "$sourcePng" -resize 256x256 -resize 48x48 -resize 32x32 -resize 16x16 "$iconPath"
+          
+          # Verify the icon was created and is valid
+          if (Test-Path $iconPath) {
+            $iconSize = (Get-Item $iconPath).Length
+            Write-Host "ICO file created successfully. Size: $iconSize bytes"
+            
+            # Additional verification - try to read the file
+            try {
+              $iconBytes = [System.IO.File]::ReadAllBytes($iconPath)
+              if ($iconBytes.Length -gt 0 -and $iconBytes[0] -eq 0x00 -and $iconBytes[1] -eq 0x00) {
+                Write-Host "ICO file format verification passed"
+              } else {
+                Write-Host "Warning: ICO file may have format issues"
+              }
+            } catch {
+              Write-Host "Warning: Could not verify ICO file format"
+            }
+          } else {
+            Write-Host "Error: ICO file was not created"
+            exit 1
           }
 
       - name: Build Tauri application
