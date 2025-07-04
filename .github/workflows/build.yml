@@ -88,9 +88,32 @@ jobs:
         run: |
           bun install
 
+      - name: Fix icon format issue
+        working-directory: claudia
+        shell: powershell
+        run: |
+          # Check if the problematic icon exists and remove it to use Tauri's default
+          if (Test-Path "src-tauri\icons\icon.ico") {
+            Write-Host "Removing problematic icon.ico file..."
+            Remove-Item "src-tauri\icons\icon.ico" -Force
+          }
+          
+          # Also check for and remove other potentially problematic icon files
+          if (Test-Path "src-tauri\icons") {
+            Get-ChildItem "src-tauri\icons\*.ico" | ForEach-Object {
+              Write-Host "Removing icon file: $($_.Name)"
+              Remove-Item $_.FullName -Force
+            }
+          }
+          
+          # Let Tauri use its default icon or generate one
+          Write-Host "Icon files removed. Tauri will use default icon."
+
       - name: Build Tauri application
         working-directory: claudia
         shell: powershell
+        env:
+          RUST_BACKTRACE: 1
         run: |
           bun run tauri build --target ${{ matrix.target }}
 
