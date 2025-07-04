@@ -78,35 +78,46 @@ jobs:
         working-directory: claudia
         run: bun install
 
-      # --- START: THE FIX ---
-      # The original "Fix icon format issue" step was incorrect.
-      # This new step correctly modifies the tauri.conf.json in the runner
-      # to include the required .ico file for the Windows build.
+      # --- START: ICON FIX ---
+      # The icon.ico in the repository is not in a valid format for the Windows Resource Compiler.
+      # This step generates a new, valid .ico file from the source icon.png.
+      - name: Generate a valid Windows icon
+        working-directory: claudia
+        shell: powershell
+        run: |
+          Write-Host "Installing ImageMagick to create a valid .ico file..."
+          choco install imagemagick -y
+          
+          $sourcePng = "src-tauri/icons/icon.png"
+          $outputIco = "src-tauri/icons/icon.ico"
+          
+          Write-Host "Converting $sourcePng to a valid multi-resolution $outputIco..."
+          # This command creates a proper .ico file with multiple sizes for best results
+          & magick convert $sourcePng -define icon:auto-resize=16,32,48,64,256 $outputIco
+          
+          if (Test-Path $outputIco) {
+            Write-Host "Successfully generated valid icon.ico file."
+          } else {
+            Write-Error "Failed to generate icon.ico file."
+            exit 1
+          }
+      # --- END: ICON FIX ---
+
+      # --- START: CONFIG FIX ---
+      # This step ensures the tauri.conf.json includes the .ico file for the Windows bundler.
       - name: Update tauri.conf.json for Windows build
         working-directory: claudia
         shell: powershell
         run: |
           $configFile = "src-tauri/tauri.conf.json"
-          Write-Host "Reading configuration from $configFile"
-          
-          # Read the JSON file and convert it to a PowerShell object
           $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
-          
-          # Add the required icon file to the icon array if it doesn't already exist
           if ($config.bundle.icon -notcontains "icons/icon.ico") {
             Write-Host "Adding 'icons/icon.ico' to the bundle icon list."
             $config.bundle.icon += "icons/icon.ico"
-          } else {
-            Write-Host "'icons/icon.ico' is already present. No changes needed."
           }
-          
-          # Convert the object back to a JSON string and save it.
-          # Using -Depth 5 is a safe choice for nested config files.
           $config | ConvertTo-Json -Depth 5 | Set-Content -Path $configFile
-          
-          Write-Host "Successfully updated $configFile. New content:"
-          Get-Content $configFile
-      # --- END: THE FIX ---
+          Write-Host "Successfully updated $configFile."
+      # --- END: CONFIG FIX ---
 
       - name: Build Tauri application
         working-directory: claudia
