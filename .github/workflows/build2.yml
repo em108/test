@@ -1,0 +1,180 @@
+name: Build Claudia 2
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: Repository to clone and build
+        type: string
+        default: getAsterisk/claudia
+      ref:
+        description: Branch/tag/ref to build
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository to clone and build
+        type: string
+        default: getAsterisk/claudia
+      ref:
+        description: Branch/tag/ref to build
+        type: string
+        default: main
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc]
+        include:
+          - target: x86_64-pc-windows-msvc
+            artifact_name: claudia-windows-x64
+
+    steps:
+      - name: Enable long paths in Git
+        run: |
+          git config --system core.longpaths true
+
+      - name: Enable long paths in Windows
+        shell: powershell
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+
+      - name: Checkout self
+        uses: actions/checkout@v4
+
+      - name: Checkout Claudia
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          path: claudia
+
+      - name: Install WebView2
+        shell: powershell
+        run: |
+          # Download and install WebView2 Runtime
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "MicrosoftEdgeWebview2Setup.exe"
+          Start-Process -FilePath "MicrosoftEdgeWebview2Setup.exe" -ArgumentList "/silent", "/install" -Wait
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install Bun
+        shell: powershell
+        run: |
+          irm bun.sh/install.ps1 | iex
+
+      - name: Add Bun to PATH
+        shell: powershell
+        run: |
+          $bunPath = "$env:USERPROFILE\.bun\bin"
+          echo "$bunPath" >> $env:GITHUB_PATH
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "claudia/src-tauri -> target"
+
+      - name: Install frontend dependencies
+        working-directory: claudia
+        shell: powershell
+        run: |
+          bun install
+
+      - name: Fix icon format issue
+        working-directory: claudia
+        shell: powershell
+        run: |
+          # Create icons directory if it doesn't exist
+          if (!(Test-Path "src-tauri\icons")) {
+            New-Item -ItemType Directory -Path "src-tauri\icons" -Force
+          }
+          
+          # Remove any existing problematic icon files
+          if (Test-Path "src-tauri\icons\icon.ico") {
+            Write-Host "Removing existing icon.ico..."
+            Remove-Item "src-tauri\icons\icon.ico" -Force
+          }
+          
+          # Download a known working ICO file as a temporary solution
+          Write-Host "Downloading a working ICO file..."
+          $iconUrl = "https://raw.githubusercontent.com/tauri-apps/tauri/dev/tooling/cli/templates/app/src-tauri/icons/icon.ico"
+          $iconPath = "src-tauri\icons\icon.ico"
+          
+          try {
+            Invoke-WebRequest -Uri $iconUrl -OutFile $iconPath -UseBasicParsing
+            Write-Host "Downloaded working ICO file"
+          } catch {
+            Write-Host "Failed to download ICO file, creating a basic one..."
+            
+            # Fallback: Create a minimal ICO file manually
+            # This creates a very basic 16x16 ICO file
+            $icoHeader = @(0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x10, 0x10, 0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x68, 0x04, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00)
+            $icoData = @(0x28, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+            
+            # Create a simple blue square pattern
+            $pixelData = @()
+            for ($i = 0; $i -lt 256; $i++) {
+              if ($i % 4 -eq 0) { $pixelData += 0xFF } # Blue
+              elseif ($i % 4 -eq 1) { $pixelData += 0x00 } # Green
+              elseif ($i % 4 -eq 2) { $pixelData += 0x00 } # Red
+              else { $pixelData += 0xFF } # Alpha
+            }
+            
+            # AND mask (all 0s for opaque)
+            $andMask = @(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+            
+            $allBytes = $icoHeader + $icoData + $pixelData + $andMask
+            [System.IO.File]::WriteAllBytes($iconPath, [byte[]]$allBytes)
+            Write-Host "Created basic ICO file manually"
+          }
+          
+          # Verify the icon was created and is valid
+          if (Test-Path $iconPath) {
+            $iconSize = (Get-Item $iconPath).Length
+            Write-Host "ICO file exists. Size: $iconSize bytes"
+            
+            # Verify it's a valid ICO file
+            $iconBytes = [System.IO.File]::ReadAllBytes($iconPath)
+            if ($iconBytes.Length -gt 2 -and $iconBytes[0] -eq 0x00 -and $iconBytes[1] -eq 0x00 -and $iconBytes[2] -eq 0x01 -and $iconBytes[3] -eq 0x00) {
+              Write-Host "ICO file format verification passed"
+            } else {
+              Write-Host "Warning: ICO file may have format issues"
+            }
+          } else {
+            Write-Host "Error: ICO file was not created"
+            exit 1
+          }
+
+      - name: Build Tauri application
+        working-directory: claudia
+        shell: powershell
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          bun run tauri build --target ${{ matrix.target }}
+
+      - name: Archive executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-exe
+          path: claudia/src-tauri/target/${{ matrix.target }}/release/claudia.exe
+
+      - name: Archive MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-msi
+          path: claudia/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+
+      - name: Archive NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-nsis
+          path: claudia/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
