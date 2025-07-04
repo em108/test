@@ -88,26 +88,53 @@ jobs:
         run: |
           bun install
 
-      - name: Fix icon format issue
+      - name: Generate missing icons
         working-directory: claudia
         shell: powershell
         run: |
-          # Check if the problematic icon exists and remove it to use Tauri's default
-          if (Test-Path "src-tauri\icons\icon.ico") {
-            Write-Host "Removing problematic icon.ico file..."
-            Remove-Item "src-tauri\icons\icon.ico" -Force
+          # Create icons directory if it doesn't exist
+          if (!(Test-Path "src-tauri\icons")) {
+            New-Item -ItemType Directory -Path "src-tauri\icons" -Force
           }
           
-          # Also check for and remove other potentially problematic icon files
-          if (Test-Path "src-tauri\icons") {
-            Get-ChildItem "src-tauri\icons\*.ico" | ForEach-Object {
-              Write-Host "Removing icon file: $($_.Name)"
-              Remove-Item $_.FullName -Force
+          # Check if icon.ico exists, if not, create a simple one or use Tauri's icon generation
+          if (!(Test-Path "src-tauri\icons\icon.ico")) {
+            Write-Host "icon.ico not found, generating icons..."
+            
+            # Check if there's a PNG icon we can use as source
+            $pngIcon = Get-ChildItem "src-tauri\icons\*.png" | Select-Object -First 1
+            
+            if ($pngIcon) {
+              Write-Host "Found PNG icon: $($pngIcon.Name), using it as source"
+              # Use Tauri's icon generation
+              bun run tauri icon "$($pngIcon.FullName)"
+            } else {
+              Write-Host "No PNG icon found, creating a default icon..."
+              # Create a simple default icon using PowerShell and .NET
+              Add-Type -AssemblyName System.Drawing
+              
+              # Create a simple 32x32 icon
+              $bitmap = New-Object System.Drawing.Bitmap(32, 32)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              $graphics.FillRectangle([System.Drawing.Brushes]::Blue, 0, 0, 32, 32)
+              $graphics.FillRectangle([System.Drawing.Brushes]::White, 8, 8, 16, 16)
+              $graphics.Dispose()
+              
+              # Save as PNG first
+              $bitmap.Save("src-tauri\icons\icon.png", [System.Drawing.Imaging.ImageFormat]::Png)
+              $bitmap.Dispose()
+              
+              # Now generate all icon formats from this PNG
+              bun run tauri icon "src-tauri\icons\icon.png"
             }
           }
           
-          # Let Tauri use its default icon or generate one
-          Write-Host "Icon files removed. Tauri will use default icon."
+          # Verify the icon was created
+          if (Test-Path "src-tauri\icons\icon.ico") {
+            Write-Host "icon.ico successfully created/found"
+          } else {
+            Write-Host "Warning: icon.ico still not found"
+          }
 
       - name: Build Tauri application
         working-directory: claudia
