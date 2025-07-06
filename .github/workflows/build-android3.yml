@@ -151,22 +151,24 @@ jobs:
               npx vite build
           fi
 
-      - name: Build and Sign Android APK using Secrets
+      - name: Build and Sign Android APK via Gradle Properties
         working-directory: app
-        env:
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          TAURI_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           echo "Decoding keystore from secret..."
           echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > release.keystore
-          
-          export TAURI_SIGNING_PRIVATE_KEY_PATH="./release.keystore"
-          export TAURI_KEY_ALIAS="${{ secrets.ANDROID_KEY_ALIAS }}"
 
           npx tauri android init
+
+          GRADLE_PROPS_PATH="src-tauri/gen/android/gradle.properties"
+          
+          echo "Injecting signing configuration into $GRADLE_PROPS_PATH"
+          echo "" >> $GRADLE_PROPS_PATH
+          echo "KEYSTORE_PATH=../../../release.keystore" >> $GRADLE_PROPS_PATH
+          echo "KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GRADLE_PROPS_PATH
+          echo "KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GRADLE_PROPS_PATH
+          echo "KEY_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GRADLE_PROPS_PATH
           
           echo "Starting Tauri Android build..."
-          # The --release flag is not needed for `tauri android build` in v2, as it's the default.
           npx tauri android build --apk
 
       - name: Find and Rename APK
@@ -174,7 +176,8 @@ jobs:
         working-directory: app
         run: |
           echo "Searching for signed release APK..."
-          APK_PATH=$(find src-tauri/gen/android -name "*-release-unsigned-signed.apk" -o -name "*-release-signed.apk" | head -1)
+          # The signed APK name from Gradle is predictable.
+          APK_PATH=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release-signed.apk" | head -1)
           
           if [ -z "$APK_PATH" ]; then
             echo "ERROR: Signed release APK not found!"
