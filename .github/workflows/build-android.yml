@@ -1,0 +1,258 @@
+name: Build Vite App for Android
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: Repository to clone and build
+        type: string
+        required: true
+      ref:
+        description: Branch/tag/ref to build
+        type: string
+        required: true
+      app_name:
+        description: App name for the Android build
+        type: string
+        default: "MyApp"
+      bundle_id:
+        description: Bundle identifier (e.g., com.example.myapp)
+        type: string
+        default: "com.example.myapp"
+    secrets:
+      GITHUB_TOKEN:
+        description: GitHub token for private repos
+        required: false
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository to clone and build
+        type: string
+        required: true
+      ref:
+        description: Branch/tag/ref to build
+        type: string
+        default: main
+      app_name:
+        description: App name for the Android build
+        type: string
+        default: "MyApp"
+      bundle_id:
+        description: Bundle identifier (e.g., com.example.myapp)
+        type: string
+        default: "com.example.myapp"
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v4
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.GITHUB_TOKEN || github.token }}
+          path: app
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '10406996'
+          
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-33"
+          sdkmanager "build-tools;33.0.0"
+          sdkmanager "ndk;25.2.9519653"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            i686-linux-android
+            x86_64-linux-android
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/src-tauri -> target"
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile
+          elif [ -f "pnpm-lock.yaml" ]; then
+            npm install -g pnpm
+            pnpm install --frozen-lockfile
+          elif [ -f "bun.lockb" ]; then
+            npm install -g bun
+            bun install
+          else
+            npm install
+          fi
+
+      - name: Check if Tauri is already initialized
+        id: check_tauri
+        working-directory: app
+        run: |
+          if [ -f "src-tauri/tauri.conf.json" ]; then
+            echo "tauri_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "tauri_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Tauri CLI
+        if: steps.check_tauri.outputs.tauri_exists == 'false'
+        working-directory: app
+        run: |
+          npm install --save-dev @tauri-apps/cli@latest
+          npm install @tauri-apps/api@latest
+
+      - name: Initialize Tauri
+        if: steps.check_tauri.outputs.tauri_exists == 'false'
+        working-directory: app
+        run: |
+          npx tauri init --ci \
+            --app-name "${{ inputs.app_name }}" \
+            --window-title "${{ inputs.app_name }}" \
+            --dist-dir "dist" \
+            --dev-url "http://localhost:5173"
+
+      - name: Initialize Tauri for Android
+        working-directory: app
+        run: |
+          npx tauri android init
+
+      - name: Update Tauri configuration for Android
+        working-directory: app
+        run: |
+          # Update bundle identifier
+          sed -i 's/"identifier": "com.tauri.dev"/"identifier": "${{ inputs.bundle_id }}"/' src-tauri/tauri.conf.json
+          
+          # Update app name
+          sed -i 's/"productName": ".*"/"productName": "${{ inputs.app_name }}"/' src-tauri/tauri.conf.json
+          
+          # Ensure dist directory is correct
+          if [ -d "dist" ]; then
+            sed -i 's/"distDir": ".*"/"distDir": "..\/dist"/' src-tauri/tauri.conf.json
+          elif [ -d "build" ]; then
+            sed -i 's/"distDir": ".*"/"distDir": "..\/build"/' src-tauri/tauri.conf.json
+          fi
+
+      - name: Create Android keystore
+        working-directory: app
+        run: |
+          keytool -genkey -v \
+            -keystore android-keystore.jks \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -alias android-key \
+            -dname "CN=GitHub Actions, OU=CI, O=GitHub, L=San Francisco, ST=California, C=US" \
+            -storepass password \
+            -keypass password
+
+      - name: Build frontend
+        working-directory: app
+        run: |
+          if npm run build >/dev/null 2>&1; then
+            npm run build
+          elif npm run build:prod >/dev/null 2>&1; then
+            npm run build:prod
+          else
+            echo "No build script found, trying vite build directly"
+            npx vite build
+          fi
+
+      - name: Build Android APK
+        working-directory: app
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
+        run: |
+          # Set up signing configuration
+          mkdir -p src-tauri/gen/android/app
+          cat > src-tauri/gen/android/keystore.properties << EOF
+          storePassword=password
+          keyPassword=password
+          keyAlias=android-key
+          storeFile=../../../android-keystore.jks
+          EOF
+          
+          # Build the APK
+          npx tauri android build --apk
+
+      - name: Find APK files
+        id: find_apk
+        working-directory: app
+        run: |
+          APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
+          if [ -n "$APK_PATH" ]; then
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            echo "APK found at: $APK_PATH"
+          else
+            echo "No APK found!"
+            exit 1
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: app/${{ steps.find_apk.outputs.apk_path }}
+          retention-days: 30
+
+      - name: Upload debug info
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-debug-info
+          path: |
+            app/src-tauri/gen/android/app/build/outputs/logs/
+            app/src-tauri/target/
+          retention-days: 5
+
+  build-info:
+    runs-on: ubuntu-latest
+    needs: build-android
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## 📱 Android Build Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch/Ref:** ${{ inputs.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "**App Name:** ${{ inputs.app_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Bundle ID:** ${{ inputs.bundle_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifacts Generated:" >> $GITHUB_STEP_SUMMARY
+          echo "- Android APK (signed with debug keystore)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Next Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the APK from the artifacts section" >> $GITHUB_STEP_SUMMARY
+          echo "2. Install on your Android device or emulator" >> $GITHUB_STEP_SUMMARY
+          echo "3. For production releases, replace the debug keystore with your release keystore" >> $GITHUB_STEP_SUMMARY
