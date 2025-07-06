@@ -225,7 +225,7 @@ jobs:
         with:
           name: android-apk
           path: app/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 30
+          retention-days: 2
 
       - name: Upload debug info on failure
         uses: actions/upload-artifact@v4
