@@ -142,15 +142,10 @@ jobs:
             --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
-      - name: Initialize Tauri for Android
-        working-directory: app
-        run: |
-          npx tauri android init
-
       - name: Update Tauri configuration for Android
         working-directory: app
         run: |
-          # Update bundle identifier
+          # Update bundle identifier BEFORE initializing Android
           sed -i 's/"identifier": "com.tauri.dev"/"identifier": "${{ inputs.bundle_id }}"/' src-tauri/tauri.conf.json
           
           # Update app name
@@ -162,6 +157,15 @@ jobs:
           elif [ -d "build" ]; then
             sed -i 's/"distDir": ".*"/"distDir": "..\/build"/' src-tauri/tauri.conf.json
           fi
+
+      - name: Initialize Tauri for Android
+        working-directory: app
+        run: |
+          # Clean up any existing Android project
+          rm -rf src-tauri/gen/android
+          
+          # Initialize Android project with correct bundle identifier
+          npx tauri android init
 
       - name: Create Android keystore
         working-directory: app
