@@ -216,28 +216,6 @@ jobs:
           storeFile=../../../android-keystore.jks
           EOF
           
-          # Update build.gradle to use keystore
-          if [ -f "src-tauri/gen/android/app/build.gradle" ]; then
-            # Add keystore configuration to build.gradle if not already present
-            if ! grep -q "keystore.properties" src-tauri/gen/android/app/build.gradle; then
-              sed -i '/android {/a\
-    def keystorePropertiesFile = rootProject.file("keystore.properties")\
-    def keystoreProperties = new Properties()\
-    if (keystorePropertiesFile.exists()) {\
-        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
-    }\
-' src-tauri/gen/android/app/build.gradle
-              
-              sed -i '/buildTypes {/a\
-        debug {\
-            if (keystorePropertiesFile.exists()) {\
-                signingConfig signingConfigs.debug\
-            }\
-        }\
-' src-tauri/gen/android/app/build.gradle
-            fi
-          fi
-          
           # Build the APK
           npx tauri android build --apk
 
