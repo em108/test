@@ -73,30 +73,18 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: '10406996'
-          
-      - name: Install Android SDK components
+
+      - name: Install Android SDK components and set NDK_HOME
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "platforms;android-33"
-          sdkmanager "build-tools;33.0.0"
-          sdkmanager "ndk;25.2.9519653"
-
+          sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;25.2.9519653"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
+        
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: |
-            aarch64-linux-android
-            armv7-linux-androideabi
-            i686-linux-android
-            x86_64-linux-android
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "app/src-tauri -> target"
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Install frontend dependencies
         working-directory: app
@@ -124,15 +112,14 @@ jobs:
           else
             echo "tauri_exists=false" >> $GITHUB_OUTPUT
           fi
-
-      - name: Install Tauri CLI
-        if: steps.check_tauri.outputs.tauri_exists == 'false'
+      
+      - name: Install Tauri CLI & API
         working-directory: app
         run: |
           npm install --save-dev @tauri-apps/cli@latest
           npm install @tauri-apps/api@latest
 
-      - name: Initialize Tauri
+      - name: Initialize Tauri if needed
         if: steps.check_tauri.outputs.tauri_exists == 'false'
         working-directory: app
         run: |
@@ -142,62 +129,84 @@ jobs:
             --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
-      - name: Update Tauri configuration for Android
+      - name: Setup package.json scripts
         working-directory: app
         run: |
-          # Update bundle identifier BEFORE initializing Android
-          sed -i 's/"identifier": "com.tauri.dev"/"identifier": "${{ inputs.bundle_id }}"/' src-tauri/tauri.conf.json
+          # Install jq for JSON manipulation
+          sudo apt-get update && sudo apt-get install -y jq
           
-          # Update app name in tauri.conf.json
-          sed -i 's/"productName": ".*"/"productName": "${{ inputs.app_name }}"/' src-tauri/tauri.conf.json
+          # Ensure package.json has required scripts
+          if [ -f "package.json" ]; then
+            # Add tauri script if it doesn't exist
+            if ! jq -e '.scripts.tauri' package.json > /dev/null; then
+              jq '.scripts.tauri = "tauri"' package.json > tmp.json && mv tmp.json package.json
+            fi
+            
+            # Add build script if it doesn't exist
+            if ! jq -e '.scripts.build' package.json > /dev/null; then
+              jq '.scripts.build = "vite build"' package.json > tmp.json && mv tmp.json package.json
+            fi
+            
+            # Add dev script if it doesn't exist
+            if ! jq -e '.scripts.dev' package.json > /dev/null; then
+              jq '.scripts.dev = "vite"' package.json > tmp.json && mv tmp.json package.json
+            fi
+            
+            echo "--- Updated package.json scripts ---"
+            jq '.scripts' package.json
+          else
+            echo "No package.json found, creating one..."
+            cat > package.json << 'EOF'
+          {
+            "name": "app",
+            "version": "1.0.0",
+            "scripts": {
+              "dev": "vite",
+              "build": "vite build",
+              "tauri": "tauri"
+            }
+          }
+          EOF
+          fi
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/src-tauri -> target"
+
+      - name: Update Tauri configuration
+        working-directory: app
+        run: |
+          jq '
+            .identifier = "${{ inputs.bundle_id }}" |
+            .productName = "${{ inputs.app_name }}" |
+            .build.frontendDist = "../dist" |
+            .build.devUrl = "http://localhost:5173" |
+            .build.beforeDevCommand = "npm run dev" |
+            .build.beforeBuildCommand = "npm run build"
+          ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
-          # Update package name in Cargo.toml
-          sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')"'"/' src-tauri/Cargo.toml
+          CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
+          sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
           
-          # Fix frontendDist path - it should be relative to src-tauri directory
-          sed -i 's/"frontendDist": ".*"/"frontendDist": "..\/dist"/' src-tauri/tauri.conf.json
-          
-          # Debug: Show the current tauri.conf.json
-          echo "Current tauri.conf.json content:"
+          echo "--- Updated tauri.conf.json ---"
           cat src-tauri/tauri.conf.json
 
       - name: Build frontend
         working-directory: app
         run: |
-          if npm run build >/dev/null 2>&1; then
-            npm run build
-          elif npm run build:prod >/dev/null 2>&1; then
-            npm run build:prod
-          else
-            echo "No build script found, trying vite build directly"
-            npx vite build
-          fi
-
-      - name: Verify dist directory exists
-        working-directory: app
-        run: |
+          echo "Building frontend..."
+          npm run build
+          
+          # Verify dist directory exists
           if [ ! -d "dist" ]; then
-            echo "Error: dist directory not found!"
-            echo "Contents of current directory:"
+            echo "Error: dist directory not found after build"
             ls -la
             exit 1
           fi
           
-          echo "Contents of dist directory:"
+          echo "Frontend built successfully"
           ls -la dist/
-          
-          # Verify the path from src-tauri perspective
-          echo "Verifying path from src-tauri directory:"
-          ls -la src-tauri/../dist/
-
-      - name: Initialize Tauri for Android
-        working-directory: app
-        run: |
-          # Clean up any existing Android project
-          rm -rf src-tauri/gen/android
-          
-          # Initialize Android project with correct bundle identifier
-          npx tauri android init
 
       - name: Create Android keystore
         working-directory: app
@@ -211,78 +220,107 @@ jobs:
             -dname "CN=GitHub Actions, OU=CI, O=GitHub, L=San Francisco, ST=California, C=US" \
             -storepass password \
             -keypass password
+            
+      - name: Initialize Android project
+        working-directory: app
+        run: |
+          echo "Initializing Android project..."
+          npx tauri android init
+          
+          # Verify Android project was created
+          if [ ! -d "src-tauri/gen/android" ]; then
+            echo "Error: Android project not created"
+            exit 1
+          fi
+          
+          echo "Android project initialized successfully"
+
+      - name: Fix Android build configuration
+        working-directory: app
+        run: |
+          # Update gradle wrapper permissions
+          chmod +x src-tauri/gen/android/gradlew
+          
+          # Create local.properties if it doesn't exist
+          if [ ! -f "src-tauri/gen/android/local.properties" ]; then
+            cat > src-tauri/gen/android/local.properties << EOF
+          sdk.dir=$ANDROID_HOME
+          ndk.dir=$NDK_HOME
+          EOF
+          fi
+          
+          # Ensure proper gradle configuration
+          cd src-tauri/gen/android
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m" >> gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
 
       - name: Build Android APK
         working-directory: app
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
         run: |
-          # Verify Android project structure exists
-          if [ ! -d "src-tauri/gen/android" ]; then
-            echo "Android project not found. Re-initializing..."
-            npx tauri android init
-          fi
+          echo "Building Android APK..."
+          export TAURI_SIGNING_PRIVATE_KEY_PATH="$(pwd)/android-keystore.jks"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
           
-          # Set up signing configuration
-          mkdir -p src-tauri/gen/android/app
-          cat > src-tauri/gen/android/keystore.properties << EOF
-          storePassword=password
-          keyPassword=password
-          keyAlias=android-key
-          storeFile=../../../android-keystore.jks
-          EOF
+          # Build with verbose output for debugging
+          npx tauri android build --apk --verbose
           
-          # Build the APK
-          npx tauri android build --apk
+          echo "APK build completed"
 
-      - name: Find APK files
+      - name: Find and Rename APK
         id: find_apk
         working-directory: app
         run: |
-          APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
-          if [ -n "$APK_PATH" ]; then
-            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-            echo "APK found at: $APK_PATH"
-          else
-            echo "No APK found!"
-            exit 1
+          echo "Searching for APK files..."
+          find . -name "*.apk" -type f
+          
+          APK_PATH=$(find src-tauri/gen/android -name "*-release-signed.apk" -type f | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Signed release APK not found, looking for any release APK..."
+            APK_PATH=$(find src-tauri/gen/android -name "*-release.apk" -type f | head -1)
+          fi
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "Release APK not found, looking for any APK..."
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
           fi
 
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found! Dumping directory structure..."
+            find . -type f -name "*.apk" 2>/dev/null || echo "No APK files found anywhere"
+            ls -laR src-tauri/gen/android/app/build/outputs/ 2>/dev/null || echo "No build outputs found"
+            exit 1
+          fi
+          
+          echo "Found APK: $APK_PATH"
+          
+          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
+          
+          cp "$APK_PATH" "$NEW_NAME"
+          
+          echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "APK found and renamed to: $NEW_NAME"
+          echo "APK size: $(du -h "$NEW_NAME" | cut -f1)"
+          
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: app/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 30
+          retention-days: 3
 
-      - name: Upload debug info
+      - name: Upload debug info on failure
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: build-debug-info
           path: |
             app/src-tauri/gen/android/app/build/outputs/logs/
+            app/src-tauri/gen/android/app/build/outputs/apk/
             app/src-tauri/target/
-          retention-days: 5
-
-  build-info:
-    runs-on: ubuntu-latest
-    needs: build-android
-    steps:
-      - name: Build Summary
-        run: |
-          echo "## 📱 Android Build Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Repository:** ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch/Ref:** ${{ inputs.ref }}" >> $GITHUB_STEP_SUMMARY
-          echo "**App Name:** ${{ inputs.app_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Bundle ID:** ${{ inputs.bundle_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Artifacts Generated:" >> $GITHUB_STEP_SUMMARY
-          echo "- Android APK (signed with debug keystore)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🚀 Next Steps:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download the APK from the artifacts section" >> $GITHUB_STEP_SUMMARY
-          echo "2. Install on your Android device or emulator" >> $GITHUB_STEP_SUMMARY
-          echo "3. For production releases, replace the debug keystore with your release keystore" >> $GITHUB_STEP_SUMMARY
+            app/package.json
+            app/src-tauri/tauri.conf.json
+            app/src-tauri/Cargo.toml
+          retention-days: 1
