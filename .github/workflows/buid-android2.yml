@@ -1,44 +1,55 @@
-name: Build Vite App for Android Gemini
+# This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
+name: Build Android App with Production Signing (Tauri v2)
 
 on:
   workflow_call:
     inputs:
       repository:
-        description: Repository to clone and build
+        description: 'Repository to clone and build (e.g., "my-org/my-app")'
         type: string
         required: true
       ref:
-        description: Branch/tag/ref to build
+        description: 'Branch, tag, or ref to build (e.g., "main")'
         type: string
         required: true
       app_name:
-        description: App name for the Android build
+        description: 'App name for the Android build (e.g., "MyApp")'
         type: string
         default: "MyApp"
       bundle_id:
-        description: Bundle identifier (e.g., com.example.myapp)
+        description: 'Bundle identifier (e.g., "com.example.myapp")'
         type: string
         default: "com.example.myapp"
     secrets:
       WF_TOKEN:
-        description: GitHub token for private repos
+        description: 'GitHub token with access to private repositories, if needed.'
         required: false
+      ANDROID_KEYSTORE_B64:
+        description: 'Base64 encoded content of the release keystore file.'
+        required: true
+      ANDROID_KEYSTORE_PASSWORD:
+        description: 'The password for the release keystore.'
+        required: true
+      ANDROID_KEY_ALIAS:
+        description: 'The alias of the key within the keystore.'
+        required: true
+
   workflow_dispatch:
     inputs:
       repository:
-        description: Repository to clone and build
+        description: 'Repository to clone and build (e.g., "my-org/my-app")'
         type: string
         required: true
       ref:
-        description: Branch/tag/ref to build
+        description: 'Branch, tag, or ref to build (e.g., "main")'
         type: string
         default: main
       app_name:
-        description: App name for the Android build
+        description: 'App name for the Android build (e.g., "MyApp")'
         type: string
         default: "MyApp"
       bundle_id:
-        description: Bundle identifier (e.g., com.example.myapp)
+        description: 'Bundle identifier (e.g., "com.example.myapp")'
         type: string
         default: "com.example.myapp"
 
@@ -47,10 +58,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout self
+      - name: Checkout self (workflow repository)
         uses: actions/checkout@v4
 
-      - name: Checkout target repository
+      - name: Checkout target repository (application code)
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
@@ -65,7 +76,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      - name: Setup Java
+      - name: Setup Java (for Gradle)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -80,7 +91,7 @@ jobs:
           sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;25.2.9519653"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
         
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain with Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -89,68 +100,43 @@ jobs:
       - name: Install frontend dependencies
         working-directory: app
         run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci
-          elif [ -f "yarn.lock" ]; then
-            yarn install --frozen-lockfile
-          elif [ -f "pnpm-lock.yaml" ]; then
-            npm install -g pnpm
-            pnpm install --frozen-lockfile
-          elif [ -f "bun.lockb" ]; then
-            npm install -g bun
-            bun install
-          else
-            npm install
+          if [ -f "package-lock.json" ]; then npm ci;
+          elif [ -f "yarn.lock" ]; then yarn install --frozen-lockfile;
+          elif [ -f "pnpm-lock.yaml" ]; then npm install -g pnpm && pnpm install --frozen-lockfile;
+          elif [ -f "bun.lockb" ]; then npm install -g bun && bun install;
+          else npm install; fi
+
+      - name: Initialize Tauri if not present
+        working-directory: app
+        run: |
+          if [ ! -f "src-tauri/tauri.conf.json" ]; then
+            npm install --save-dev @tauri-apps/cli@latest @tauri-apps/api@latest
+            npx tauri init --ci \
+              --app-name "${{ inputs.app_name }}" \
+              --window-title "${{ inputs.app_name }}" \
+              --frontend-dist "dist" \
+              --dev-url "http://localhost:5173"
           fi
 
-      - name: Check if Tauri is already initialized
-        id: check_tauri
-        working-directory: app
-        run: |
-          if [ -f "src-tauri/tauri.conf.json" ]; then
-            echo "tauri_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "tauri_exists=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Install Tauri CLI & API
-        if: steps.check_tauri.outputs.tauri_exists == 'false'
-        working-directory: app
-        run: |
-          npm install --save-dev @tauri-apps/cli@latest
-          npm install @tauri-apps/api@latest
-
-      - name: Initialize Tauri if needed
-        if: steps.check_tauri.outputs.tauri_exists == 'false'
-        working-directory: app
-        run: |
-          npx tauri init --ci \
-            --app-name "${{ inputs.app_name }}" \
-            --window-title "${{ inputs.app_name }}" \
-            --frontend-dist "dist" \
-            --dev-url "http://localhost:5173"
-
-      # ***** THE CRITICAL FIX IS HERE *****
       - name: Add tauri script to package.json
         working-directory: app
-        run: |
-          npm pkg set "scripts.tauri"="tauri"
-          echo "--- Updated package.json ---"
-          cat package.json
+        run: npm pkg set "scripts.tauri"="tauri"
 
-      - name: Rust Cache
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "app/src-tauri -> target"
 
-      - name: Update Tauri configuration
+      - name: Update Tauri configuration for Android (Tauri v2 Schema)
         working-directory: app
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           jq '
-            .identifier = "${{ inputs.bundle_id }}" |
             .productName = "${{ inputs.app_name }}" |
-            .build.frontendDist = "../dist"
+            .identifier = "${{ inputs.bundle_id }}" |
+            .build.frontendDist = "../dist" |
+            .android.minSdkVersion = 24 |
+            .android.targetSdkVersion = 33
           ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
@@ -166,42 +152,33 @@ jobs:
               npx vite build
           fi
 
-      - name: Create Android keystore
+      - name: Build and Sign Android APK using Secrets
         working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TAURI_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          keytool -genkey -v \
-            -keystore android-keystore.jks \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -alias android-key \
-            -dname "CN=GitHub Actions, OU=CI, O=GitHub, L=San Francisco, ST=California, C=US" \
-            -storepass password \
-            -keypass password
-
-      - name: Initialize and Build Android APK
-        working-directory: app
-        run: |
-          export TAURI_SIGNING_PRIVATE_KEY_PATH="android-keystore.jks"
-          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
+          echo "Decoding keystore from secret..."
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > release.keystore
           
-          # Initialize first, then build
+          export TAURI_SIGNING_PRIVATE_KEY_PATH="./release.keystore"
+          export TAURI_KEY_ALIAS="${{ secrets.ANDROID_KEY_ALIAS }}"
+
           npx tauri android init
-          npx tauri android build --apk
+          
+          echo "Starting Tauri Android build..."
+          npx tauri android build --apk --release
 
       - name: Find and Rename APK
         id: find_apk
         working-directory: app
         run: |
-          APK_PATH=$(find src-tauri/gen/android -name "*-release-signed.apk" -type f | head -1)
+          echo "Searching for signed release APK..."
+          APK_PATH=$(find src-tauri/gen/android -name "*-release-unsigned-signed.apk" -o -name "*-release-signed.apk" | head -1)
+          
           if [ -z "$APK_PATH" ]; then
-            echo "Release APK not found! Looking for any APK..."
-            APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
-          fi
-
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found! Dumping directory structure."
-            find . -type f -name "*.apk"
+            echo "ERROR: Signed release APK not found!"
+            echo "Dumping directory structure for debugging:"
             ls -laR src-tauri/gen/android
             exit 1
           fi
@@ -210,23 +187,23 @@ jobs:
           COMMIT_HASH=$(git rev-parse --short HEAD)
           NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
           
+          echo "Moving '$APK_PATH' to '$NEW_NAME'"
           mv "$APK_PATH" "$NEW_NAME"
           
           echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
-          echo "APK found and renamed to: $NEW_NAME"
           
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: android-apk-${{ github.run_id }}
           path: app/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 3
+          retention-days: 7
 
       - name: Upload debug info on failure
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: build-debug-info
+          name: build-debug-info-${{ github.run_id }}
           path: |
             app/src-tauri/gen/android/app/build/outputs/logs/
             app/src-tauri/target/
