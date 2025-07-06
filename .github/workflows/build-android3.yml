@@ -1,5 +1,5 @@
 # This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
-name: Build Android App with Production Signing (Tauri v2)
+name: Build Android App with Production Signing (Tauri v2 - Final)
 
 on:
   workflow_call:
@@ -135,8 +135,8 @@ jobs:
             .productName = "${{ inputs.app_name }}" |
             .identifier = "${{ inputs.bundle_id }}" |
             .build.frontendDist = "../dist" |
-            .android.minSdkVersion = 24 |
-            .android.targetSdkVersion = 33
+            .bundle.android.minSdkVersion = 24 |
+            .bundle.android.targetSdkVersion = 33
           ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
