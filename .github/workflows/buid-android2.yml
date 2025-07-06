@@ -139,24 +139,18 @@ jobs:
       - name: Update Tauri configuration
         working-directory: app
         run: |
-          # Use jq for reliable JSON editing
           sudo apt-get update && sudo apt-get install -y jq
-
-          # *** THIS IS THE CORRECTED JQ COMMAND ***
           jq '
             .identifier = "${{ inputs.bundle_id }}" |
             .productName = "${{ inputs.app_name }}" |
             .build.frontendDist = "../dist"
           ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
-          # Update package name in Cargo.toml (crates.io prefers hyphens)
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
           sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
-
+          
           echo "--- Updated tauri.conf.json ---"
           cat src-tauri/tauri.conf.json
-          echo "--- Updated Cargo.toml ---"
-          cat src-tauri/Cargo.toml
 
       - name: Build frontend
         working-directory: app
@@ -180,22 +174,23 @@ jobs:
             -dname "CN=GitHub Actions, OU=CI, O=GitHub, L=San Francisco, ST=California, C=US" \
             -storepass password \
             -keypass password
+            
+      # ***** FIX IS HERE: Separated init and build steps *****
+      - name: Initialize Android project
+        working-directory: app
+        run: npx tauri android init
 
       - name: Build Android APK
         working-directory: app
         run: |
-          # Use Tauri's environment variables for signing
           export TAURI_SIGNING_PRIVATE_KEY_PATH="android-keystore.jks"
           export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
-          
-          # Build the APK. This will also run `tauri android init` if needed.
           npx tauri android build --apk
 
       - name: Find and Rename APK
         id: find_apk
         working-directory: app
         run: |
-          # Find the release APK
           APK_PATH=$(find src-tauri/gen/android -name "*-release-signed.apk" -type f | head -1)
           if [ -z "$APK_PATH" ]; then
             echo "Release APK not found! Looking for any APK..."
@@ -203,16 +198,16 @@ jobs:
           fi
 
           if [ -z "$APK_PATH" ]; then
-            echo "No APK found!"
+            echo "No APK found! Dumping directory structure."
+            find . -type f -name "*.apk"
+            ls -laR src-tauri/gen/android
             exit 1
           fi
           
-          # Create a sanitized name from the app name and commit hash
           SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
           COMMIT_HASH=$(git rev-parse --short HEAD)
           NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
           
-          # Move to the root of the 'app' directory for easier artifact pathing
           mv "$APK_PATH" "$NEW_NAME"
           
           echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
