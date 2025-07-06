@@ -1,4 +1,4 @@
-name: Build Vite App for Android 2
+name: Build Vite App for Android Gemini
 
 on:
   workflow_call:
@@ -79,9 +79,7 @@ jobs:
       - name: Install Android SDK components
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "platforms;android-33"
-          sdkmanager "build-tools;33.0.0"
-          sdkmanager "ndk;25.2.9519653"
+          sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;25.2.9519653"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -151,23 +149,23 @@ jobs:
           # Update app name in tauri.conf.json
           sed -i 's/"productName": ".*"/"productName": "${{ inputs.app_name }}"/' src-tauri/tauri.conf.json
           
-          # Update package name in Cargo.toml
-          sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')"'"/' src-tauri/Cargo.toml
+          # Update package name in Cargo.toml to be a valid Rust crate name
+          sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')"'"/' src-tauri/Cargo.toml
           
-          # Ensure dist directory is correct
-          if [ -d "dist" ]; then
-            sed -i 's/"distDir": ".*"/"distDir": "..\/dist"/' src-tauri/tauri.conf.json
-          elif [ -d "build" ]; then
-            sed -i 's/"distDir": ".*"/"distDir": "..\/build"/' src-tauri/tauri.conf.json
-          fi
+          # *** THE FIX: Update `frontendDist` (not `distDir`) path to be relative to src-tauri ***
+          sed -i 's/"frontendDist": ".*"/"frontendDist": "..\/dist"/' src-tauri/tauri.conf.json
+          
+          # Debug: Show the current tauri.conf.json
+          echo "Current tauri.conf.json content:"
+          cat src-tauri/tauri.conf.json
 
       - name: Initialize Tauri for Android
         working-directory: app
         run: |
-          # Clean up any existing Android project
+          # Clean up any existing Android project to ensure a fresh init
           rm -rf src-tauri/gen/android
           
-          # Initialize Android project with correct bundle identifier
+          # Initialize Android project with the correct bundle identifier
           npx tauri android init
 
       - name: Create Android keystore
@@ -183,31 +181,19 @@ jobs:
             -storepass password \
             -keypass password
 
-      - name: Build frontend
-        working-directory: app
-        run: |
-          if npm run build >/dev/null 2>&1; then
-            npm run build
-          elif npm run build:prod >/dev/null 2>&1; then
-            npm run build:prod
-          else
-            echo "No build script found, trying vite build directly"
-            npx vite build
-          fi
-
       - name: Build Android APK
         working-directory: app
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
+          # Add TAURI_SIGNING_PRIVATE_KEY_PASSWORD and TAURI_SIGNING_PRIVATE_KEY for security
+          TAURI_KEY_PASSWORD: "password"
+          TAURI_KEY_STORE_PASSWORD: "password"
         run: |
-          # Verify Android project structure exists
-          if [ ! -d "src-tauri/gen/android" ]; then
-            echo "Android project not found. Re-initializing..."
-            npx tauri android init
-          fi
+          # The frontend build (`npm run build`) will be triggered automatically
+          # by the `beforeBuildCommand` in tauri.conf.json. No separate step is needed.
           
-          # Set up signing configuration
+          # Set up signing configuration for the Android project
           mkdir -p src-tauri/gen/android/app
           cat > src-tauri/gen/android/keystore.properties << EOF
           storePassword=password
@@ -215,28 +201,6 @@ jobs:
           keyAlias=android-key
           storeFile=../../../android-keystore.jks
           EOF
-          
-          # Update build.gradle to use keystore
-          if [ -f "src-tauri/gen/android/app/build.gradle" ]; then
-            # Add keystore configuration to build.gradle if not already present
-            if ! grep -q "keystore.properties" src-tauri/gen/android/app/build.gradle; then
-              sed -i '/android {/a\
-    def keystorePropertiesFile = rootProject.file("keystore.properties")\
-    def keystoreProperties = new Properties()\
-    if (keystorePropertiesFile.exists()) {\
-        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
-    }\
-' src-tauri/gen/android/app/build.gradle
-              
-              sed -i '/buildTypes {/a\
-        debug {\
-            if (keystorePropertiesFile.exists()) {\
-                signingConfig signingConfigs.debug\
-            }\
-        }\
-' src-tauri/gen/android/app/build.gradle
-            fi
-          fi
           
           # Build the APK
           npx tauri android build --apk
@@ -251,19 +215,20 @@ jobs:
             echo "APK found at: $APK_PATH"
           else
             echo "No APK found!"
+            find src-tauri/gen/android -type f
             exit 1
           fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: android-apk-${{ inputs.app_name }}
           path: app/${{ steps.find_apk.outputs.apk_path }}
           retention-days: 30
 
-      - name: Upload debug info
-        uses: actions/upload-artifact@v4
+      - name: Upload debug info on failure
         if: failure()
+        uses: actions/upload-artifact@v4
         with:
           name: build-debug-info
           path: |
@@ -285,9 +250,8 @@ jobs:
           echo "**Bundle ID:** ${{ inputs.bundle_id }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📦 Artifacts Generated:" >> $GITHUB_STEP_SUMMARY
-          echo "- Android APK (signed with debug keystore)" >> $GITHUB_STEP_SUMMARY
+          echo "- Android APK (signed with temporary CI keystore)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🚀 Next Steps:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download the APK from the artifacts section" >> $GITHUB_STEP_SUMMARY
-          echo "2. Install on your Android device or emulator" >> $GITHUB_STEP_SUMMARY
-          echo "3. For production releases, replace the debug keystore with your release keystore" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the APK from the artifacts section of this run." >> $GITHUB_STEP_SUMMARY
+          echo "2. Install on your Android device or emulator." >> $GITHUB_STEP_SUMMARY
