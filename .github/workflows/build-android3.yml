@@ -1,4 +1,5 @@
-name: Build Android App with Production Signing
+# This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
+name: Build Android App with Production Signing (Tauri v2)
 
 on:
   workflow_call:
@@ -109,7 +110,7 @@ jobs:
         working-directory: app
         run: |
           if [ ! -f "src-tauri/tauri.conf.json" ]; then
-            npm install --save-dev @tauri-apps/cli @tauri-apps/api
+            npm install --save-dev @tauri-apps/cli@latest @tauri-apps/api@latest
             npx tauri init --ci \
               --app-name "${{ inputs.app_name }}" \
               --window-title "${{ inputs.app_name }}" \
@@ -126,22 +127,20 @@ jobs:
         with:
           workspaces: "app/src-tauri -> target"
 
-      # ===== START: CORRECTED CONFIGURATION STEP =====
-      - name: Update Tauri configuration for Android
+      - name: Update Tauri configuration for Android (Tauri v2 Schema)
         working-directory: app
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           jq '
-            .package.productName = "${{ inputs.app_name }}" |
-            .build.distDir = "../dist" |
-            .tauri.bundle.identifier = "${{ inputs.bundle_id }}" |
-            .tauri.bundle.android.minSdkVersion = 24 |
-            .tauri.bundle.android.targetSdkVersion = 33
+            .productName = "${{ inputs.app_name }}" |
+            .identifier = "${{ inputs.bundle_id }}" |
+            .build.frontendDist = "../dist" |
+            .android.minSdkVersion = 24 |
+            .android.targetSdkVersion = 33
           ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
           sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
-      # ===== END: CORRECTED CONFIGURATION STEP =====
           
       - name: Build frontend
         working-directory: app
