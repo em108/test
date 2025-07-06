@@ -20,7 +20,7 @@ on:
         type: string
         default: "com.example.myapp"
     secrets:
-      GITHUB_TOKEN:
+      WF_TOKEN:
         description: GitHub token for private repos
         required: false
   workflow_dispatch:
@@ -55,7 +55,7 @@ jobs:
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.GITHUB_TOKEN || github.token }}
+          token: ${{ secrets.WF_TOKEN || github.token }}
           path: app
 
       - name: Setup Node.js
