@@ -72,6 +72,7 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
+        # Using the action's default 'latest' is often more robust
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK components and set NDK_HOME
@@ -130,7 +131,7 @@ jobs:
             --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
-      # This step fixes a potential cache error if src-tauri doesn't exist yet
+      # This step might fail if src-tauri doesn't exist yet, so it runs only if the project was pre-configured.
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         if: steps.check_tauri.outputs.tauri_exists == 'true'
@@ -143,12 +144,14 @@ jobs:
           # Use jq for reliable JSON editing
           sudo apt-get update && sudo apt-get install -y jq
 
-          # Update tauri.conf.json
-          jq '.tauri.bundle.identifier = "${{ inputs.bundle_id }}"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
-          jq '.tauri.productName = "${{ inputs.app_name }}"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
-          jq '.build.distDir = "../dist"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+          # Correctly update tauri.conf.json for Tauri v2+
+          jq '
+            .bundle.identifier = "${{ inputs.bundle_id }}" |
+            .productName = "${{ inputs.app_name }}" |
+            .build.frontendDist = "../dist"
+          ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
-          # Update package name in Cargo.toml
+          # Update package name in Cargo.toml (crates.io prefers hyphens)
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
           sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
 
@@ -183,8 +186,7 @@ jobs:
       - name: Build Android APK
         working-directory: app
         run: |
-          # Set up signing configuration just before build
-          # This assumes `tauri android init` or `tauri android build` will create the gen/android directory
+          # Use Tauri's environment variables for signing
           export TAURI_SIGNING_PRIVATE_KEY_PATH="android-keystore.jks"
           export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
           
@@ -195,13 +197,23 @@ jobs:
         id: find_apk
         working-directory: app
         run: |
-          APK_PATH=$(find src-tauri/gen/android -name "*-release.apk" -type f | head -1)
+          # Find the release APK, not the debug one
+          APK_PATH=$(find src-tauri/gen/android -name "*-release-signed.apk" -type f | head -1)
           if [ -z "$APK_PATH" ]; then
-            echo "Release APK not found!"
+            echo "Release APK not found! Looking for any APK..."
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found!"
             exit 1
           fi
           
-          NEW_NAME="${{ inputs.app_name }}-${{ github.sha }}.apk"
+          # Create a sanitized name from the app name and commit hash
+          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
+          
           # Move to the root of the 'app' directory for easier artifact pathing
           mv "$APK_PATH" "$NEW_NAME"
           
@@ -213,7 +225,7 @@ jobs:
         with:
           name: android-apk
           path: app/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 2
+          retention-days: 30
 
       - name: Upload debug info on failure
         uses: actions/upload-artifact@v4
