@@ -1,5 +1,5 @@
 # This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
-name: Build Android App with Production Signing (Tauri v2 - Final Corrected)
+name: Build Android App with Production Signing (Tauri v2 - Final)
 
 on:
   workflow_call:
@@ -166,7 +166,8 @@ jobs:
           npx tauri android init
           
           echo "Starting Tauri Android build..."
-          npx tauri android build --apk --release
+          # The --release flag is not needed for `tauri android build` in v2, as it's the default.
+          npx tauri android build --apk
 
       - name: Find and Rename APK
         id: find_apk
