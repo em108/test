@@ -154,12 +154,12 @@ jobs:
           # Update package name in Cargo.toml
           sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')"'"/' src-tauri/Cargo.toml
           
-          # Ensure dist directory is correct
-          if [ -d "dist" ]; then
-            sed -i 's/"distDir": ".*"/"distDir": "..\/dist"/' src-tauri/tauri.conf.json
-          elif [ -d "build" ]; then
-            sed -i 's/"distDir": ".*"/"distDir": "..\/build"/' src-tauri/tauri.conf.json
-          fi
+          # Fix distDir path - it should be relative to src-tauri directory
+          sed -i 's/"distDir": ".*"/"distDir": "..\/dist"/' src-tauri/tauri.conf.json
+          
+          # Debug: Show the current tauri.conf.json
+          echo "Current tauri.conf.json content:"
+          cat src-tauri/tauri.conf.json
 
       - name: Initialize Tauri for Android
         working-directory: app
@@ -201,6 +201,17 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
         run: |
+          # Verify dist directory exists
+          if [ ! -d "dist" ]; then
+            echo "Error: dist directory not found!"
+            echo "Contents of current directory:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Contents of dist directory:"
+          ls -la dist/
+          
           # Verify Android project structure exists
           if [ ! -d "src-tauri/gen/android" ]; then
             echo "Android project not found. Re-initializing..."
