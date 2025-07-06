@@ -73,28 +73,18 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: '10406996'
-          
-      - name: Install Android SDK components
+
+      - name: Install Android SDK components and set NDK_HOME
         run: |
           yes | sdkmanager --licenses
           sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;25.2.9519653"
-
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
+        
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: |
-            aarch64-linux-android
-            armv7-linux-androideabi
-            i686-linux-android
-            x86_64-linux-android
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "app/src-tauri -> target"
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Install frontend dependencies
         working-directory: app
@@ -122,15 +112,15 @@ jobs:
           else
             echo "tauri_exists=false" >> $GITHUB_OUTPUT
           fi
-
-      - name: Install Tauri CLI
+      
+      - name: Install Tauri CLI & API
         if: steps.check_tauri.outputs.tauri_exists == 'false'
         working-directory: app
         run: |
           npm install --save-dev @tauri-apps/cli@latest
           npm install @tauri-apps/api@latest
 
-      - name: Initialize Tauri
+      - name: Initialize Tauri if needed
         if: steps.check_tauri.outputs.tauri_exists == 'false'
         working-directory: app
         run: |
@@ -140,33 +130,42 @@ jobs:
             --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
-      - name: Update Tauri configuration for Android
-        working-directory: app
-        run: |
-          # Update bundle identifier BEFORE initializing Android
-          sed -i 's/"identifier": "com.tauri.dev"/"identifier": "${{ inputs.bundle_id }}"/' src-tauri/tauri.conf.json
-          
-          # Update app name in tauri.conf.json
-          sed -i 's/"productName": ".*"/"productName": "${{ inputs.app_name }}"/' src-tauri/tauri.conf.json
-          
-          # Update package name in Cargo.toml to be a valid Rust crate name
-          sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')"'"/' src-tauri/Cargo.toml
-          
-          # *** THE FIX: Update `frontendDist` (not `distDir`) path to be relative to src-tauri ***
-          sed -i 's/"frontendDist": ".*"/"frontendDist": "..\/dist"/' src-tauri/tauri.conf.json
-          
-          # Debug: Show the current tauri.conf.json
-          echo "Current tauri.conf.json content:"
-          cat src-tauri/tauri.conf.json
+      # This step fixes a potential cache error if src-tauri doesn't exist yet
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        if: steps.check_tauri.outputs.tauri_exists == 'true'
+        with:
+          workspaces: "app/src-tauri -> target"
 
-      - name: Initialize Tauri for Android
+      - name: Update Tauri configuration
         working-directory: app
         run: |
-          # Clean up any existing Android project to ensure a fresh init
-          rm -rf src-tauri/gen/android
+          # Use jq for reliable JSON editing
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # Update tauri.conf.json
+          jq '.tauri.bundle.identifier = "${{ inputs.bundle_id }}"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+          jq '.tauri.productName = "${{ inputs.app_name }}"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+          jq '.build.distDir = "../dist"' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
           
-          # Initialize Android project with the correct bundle identifier
-          npx tauri android init
+          # Update package name in Cargo.toml
+          CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
+          sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
+
+          echo "--- Updated tauri.conf.json ---"
+          cat src-tauri/tauri.conf.json
+          echo "--- Updated Cargo.toml ---"
+          cat src-tauri/Cargo.toml
+
+      - name: Build frontend
+        working-directory: app
+        run: |
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+              npm run build
+          else
+              echo "No build script found, trying vite build directly"
+              npx vite build
+          fi
 
       - name: Create Android keystore
         working-directory: app
@@ -183,75 +182,45 @@ jobs:
 
       - name: Build Android APK
         working-directory: app
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
-          # Add TAURI_SIGNING_PRIVATE_KEY_PASSWORD and TAURI_SIGNING_PRIVATE_KEY for security
-          TAURI_KEY_PASSWORD: "password"
-          TAURI_KEY_STORE_PASSWORD: "password"
         run: |
-          # The frontend build (`npm run build`) will be triggered automatically
-          # by the `beforeBuildCommand` in tauri.conf.json. No separate step is needed.
+          # Set up signing configuration just before build
+          # This assumes `tauri android init` or `tauri android build` will create the gen/android directory
+          export TAURI_SIGNING_PRIVATE_KEY_PATH="android-keystore.jks"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
           
-          # Set up signing configuration for the Android project
-          mkdir -p src-tauri/gen/android/app
-          cat > src-tauri/gen/android/keystore.properties << EOF
-          storePassword=password
-          keyPassword=password
-          keyAlias=android-key
-          storeFile=../../../android-keystore.jks
-          EOF
-          
-          # Build the APK
+          # Build the APK. This will also run `tauri android init` if needed.
           npx tauri android build --apk
 
-      - name: Find APK files
+      - name: Find and Rename APK
         id: find_apk
         working-directory: app
         run: |
-          APK_PATH=$(find src-tauri/gen/android -name "*.apk" -type f | head -1)
-          if [ -n "$APK_PATH" ]; then
-            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-            echo "APK found at: $APK_PATH"
-          else
-            echo "No APK found!"
-            find src-tauri/gen/android -type f
+          APK_PATH=$(find src-tauri/gen/android -name "*-release.apk" -type f | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Release APK not found!"
             exit 1
           fi
-
+          
+          NEW_NAME="${{ inputs.app_name }}-${{ github.sha }}.apk"
+          # Move to the root of the 'app' directory for easier artifact pathing
+          mv "$APK_PATH" "$NEW_NAME"
+          
+          echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "APK found and renamed to: $NEW_NAME"
+          
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk-${{ inputs.app_name }}
+          name: android-apk
           path: app/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 30
+          retention-days: 2
 
       - name: Upload debug info on failure
-        if: failure()
         uses: actions/upload-artifact@v4
+        if: failure()
         with:
           name: build-debug-info
           path: |
             app/src-tauri/gen/android/app/build/outputs/logs/
             app/src-tauri/target/
-          retention-days: 5
-
-  build-info:
-    runs-on: ubuntu-latest
-    needs: build-android
-    steps:
-      - name: Build Summary
-        run: |
-          echo "## 📱 Android Build Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Repository:** ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch/Ref:** ${{ inputs.ref }}" >> $GITHUB_STEP_SUMMARY
-          echo "**App Name:** ${{ inputs.app_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Bundle ID:** ${{ inputs.bundle_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Artifacts Generated:" >> $GITHUB_STEP_SUMMARY
-          echo "- Android APK (signed with temporary CI keystore)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🚀 Next Steps:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download the APK from the artifacts section of this run." >> $GITHUB_STEP_SUMMARY
-          echo "2. Install on your Android device or emulator." >> $GITHUB_STEP_SUMMARY
+          retention-days: 1
