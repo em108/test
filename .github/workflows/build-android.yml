@@ -139,7 +139,7 @@ jobs:
           npx tauri init --ci \
             --app-name "${{ inputs.app_name }}" \
             --window-title "${{ inputs.app_name }}" \
-            --dist-dir "dist" \
+            --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
       - name: Initialize Tauri for Android
