@@ -148,8 +148,11 @@ jobs:
           # Update bundle identifier BEFORE initializing Android
           sed -i 's/"identifier": "com.tauri.dev"/"identifier": "${{ inputs.bundle_id }}"/' src-tauri/tauri.conf.json
           
-          # Update app name
+          # Update app name in tauri.conf.json
           sed -i 's/"productName": ".*"/"productName": "${{ inputs.app_name }}"/' src-tauri/tauri.conf.json
+          
+          # Update package name in Cargo.toml
+          sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')"'"/' src-tauri/Cargo.toml
           
           # Ensure dist directory is correct
           if [ -d "dist" ]; then
@@ -198,6 +201,12 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
         run: |
+          # Verify Android project structure exists
+          if [ ! -d "src-tauri/gen/android" ]; then
+            echo "Android project not found. Re-initializing..."
+            npx tauri android init
+          fi
+          
           # Set up signing configuration
           mkdir -p src-tauri/gen/android/app
           cat > src-tauri/gen/android/keystore.properties << EOF
@@ -206,6 +215,28 @@ jobs:
           keyAlias=android-key
           storeFile=../../../android-keystore.jks
           EOF
+          
+          # Update build.gradle to use keystore
+          if [ -f "src-tauri/gen/android/app/build.gradle" ]; then
+            # Add keystore configuration to build.gradle if not already present
+            if ! grep -q "keystore.properties" src-tauri/gen/android/app/build.gradle; then
+              sed -i '/android {/a\
+    def keystorePropertiesFile = rootProject.file("keystore.properties")\
+    def keystoreProperties = new Properties()\
+    if (keystorePropertiesFile.exists()) {\
+        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
+    }\
+' src-tauri/gen/android/app/build.gradle
+              
+              sed -i '/buildTypes {/a\
+        debug {\
+            if (keystorePropertiesFile.exists()) {\
+                signingConfig signingConfigs.debug\
+            }\
+        }\
+' src-tauri/gen/android/app/build.gradle
+            fi
+          fi
           
           # Build the APK
           npx tauri android build --apk
