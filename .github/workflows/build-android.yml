@@ -154,12 +154,41 @@ jobs:
           # Update package name in Cargo.toml
           sed -i 's/name = ".*"/name = "'"$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')"'"/' src-tauri/Cargo.toml
           
-          # Fix distDir path - it should be relative to src-tauri directory
-          sed -i 's/"distDir": ".*"/"distDir": "..\/dist"/' src-tauri/tauri.conf.json
+          # Fix frontendDist path - it should be relative to src-tauri directory
+          sed -i 's/"frontendDist": ".*"/"frontendDist": "..\/dist"/' src-tauri/tauri.conf.json
           
           # Debug: Show the current tauri.conf.json
           echo "Current tauri.conf.json content:"
           cat src-tauri/tauri.conf.json
+
+      - name: Build frontend
+        working-directory: app
+        run: |
+          if npm run build >/dev/null 2>&1; then
+            npm run build
+          elif npm run build:prod >/dev/null 2>&1; then
+            npm run build:prod
+          else
+            echo "No build script found, trying vite build directly"
+            npx vite build
+          fi
+
+      - name: Verify dist directory exists
+        working-directory: app
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "Error: dist directory not found!"
+            echo "Contents of current directory:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Contents of dist directory:"
+          ls -la dist/
+          
+          # Verify the path from src-tauri perspective
+          echo "Verifying path from src-tauri directory:"
+          ls -la src-tauri/../dist/
 
       - name: Initialize Tauri for Android
         working-directory: app
@@ -183,35 +212,12 @@ jobs:
             -storepass password \
             -keypass password
 
-      - name: Build frontend
-        working-directory: app
-        run: |
-          if npm run build >/dev/null 2>&1; then
-            npm run build
-          elif npm run build:prod >/dev/null 2>&1; then
-            npm run build:prod
-          else
-            echo "No build script found, trying vite build directly"
-            npx vite build
-          fi
-
       - name: Build Android APK
         working-directory: app
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
         run: |
-          # Verify dist directory exists
-          if [ ! -d "dist" ]; then
-            echo "Error: dist directory not found!"
-            echo "Contents of current directory:"
-            ls -la
-            exit 1
-          fi
-          
-          echo "Contents of dist directory:"
-          ls -la dist/
-          
           # Verify Android project structure exists
           if [ ! -d "src-tauri/gen/android" ]; then
             echo "Android project not found. Re-initializing..."
