@@ -130,9 +130,16 @@ jobs:
             --frontend-dist "dist" \
             --dev-url "http://localhost:5173"
 
+      # ***** THE CRITICAL FIX IS HERE *****
+      - name: Add tauri script to package.json
+        working-directory: app
+        run: |
+          npm pkg set "scripts.tauri"="tauri"
+          echo "--- Updated package.json ---"
+          cat package.json
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        if: steps.check_tauri.outputs.tauri_exists == 'true'
         with:
           workspaces: "app/src-tauri -> target"
 
@@ -149,9 +156,6 @@ jobs:
           CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
           sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
           
-          echo "--- Updated tauri.conf.json ---"
-          cat src-tauri/tauri.conf.json
-
       - name: Build frontend
         working-directory: app
         run: |
@@ -174,17 +178,15 @@ jobs:
             -dname "CN=GitHub Actions, OU=CI, O=GitHub, L=San Francisco, ST=California, C=US" \
             -storepass password \
             -keypass password
-            
-      # ***** FIX IS HERE: Separated init and build steps *****
-      - name: Initialize Android project
-        working-directory: app
-        run: npx tauri android init
 
-      - name: Build Android APK
+      - name: Initialize and Build Android APK
         working-directory: app
         run: |
           export TAURI_SIGNING_PRIVATE_KEY_PATH="android-keystore.jks"
           export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="password"
+          
+          # Initialize first, then build
+          npx tauri android init
           npx tauri android build --apk
 
       - name: Find and Rename APK
