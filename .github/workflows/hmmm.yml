@@ -1,0 +1,297 @@
+name: Build Android App test
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'Repository to clone and build (e.g., "my-org/my-app")'
+        type: string
+        required: true
+      ref:
+        description: 'Branch, tag, or ref to build (e.g., "main")'
+        type: string
+        required: true
+      app_name:
+        description: 'App name for the Android build (e.g., "MyApp")'
+        type: string
+        default: "MyApp"
+      bundle_id:
+        description: 'Bundle identifier (e.g., "com.example.myapp")'
+        type: string
+        default: "com.example.myapp"
+    secrets:
+      WF_TOKEN:
+        description: 'GitHub token with access to private repositories, if needed.'
+        required: false
+      ANDROID_KEYSTORE_B64:
+        description: 'Base64 encoded content of the release keystore file.'
+        required: true
+      ANDROID_KEY_PASSWORD:
+        description: 'The password for the release keystore.'
+        required: true
+      ANDROID_KEY_ALIAS:
+        description: 'The alias of the key within the keystore.'
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository to clone and build (e.g., "my-org/my-app")'
+        type: string
+        required: true
+      ref:
+        description: 'Branch, tag, or ref to build (e.g., "main")'
+        type: string
+        default: main
+      app_name:
+        description: 'App name for the Android build (e.g., "MyApp")'
+        type: string
+        default: "MyApp"
+      bundle_id:
+        description: 'Bundle identifier (e.g., "com.example.myapp")'
+        type: string
+        default: "com.example.myapp"
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout self (workflow repository)
+        uses: actions/checkout@v4
+
+      - name: Checkout target repository (application code)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.WF_TOKEN || github.token }}
+          path: app
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Java (for Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components and set NDK_HOME
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;25.2.9519653"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
+        
+      - name: Install Rust toolchain with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: |
+          if [ -f "package-lock.json" ]; then npm ci; else npm install; fi
+
+      - name: Initialize Tauri if not present
+        working-directory: app
+        run: |
+          if [ ! -f "src-tauri/tauri.conf.json" ]; then
+            npm install --save-dev @tauri-apps/cli@latest @tauri-apps/api@latest
+            npx tauri init --ci --app-name "${{ inputs.app_name }}" --window-title "${{ inputs.app_name }}" --frontend-dist "dist" --dev-url "http://localhost:5173"
+          fi
+
+      - name: Add tauri script to package.json
+        working-directory: app
+        run: npm pkg set "scripts.tauri"="tauri"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/src-tauri -> target"
+
+      - name: Update Tauri configuration for Android (Tauri v2 Schema)
+        working-directory: app
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          jq '
+            .productName = "${{ inputs.app_name }}" |
+            .identifier = "${{ inputs.bundle_id }}" |
+            .build.frontendDist = "../dist" |
+            .bundle.android.minSdkVersion = 24
+          ' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+          
+          CARGO_PKG_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
+          sed -i 's/^name = .*/name = "'"$CARGO_PKG_NAME"'"/' src-tauri/Cargo.toml
+          
+      - name: Build frontend
+        working-directory: app
+        run: |
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+              npm run build
+          else
+              echo "No build script found, trying vite build directly"
+              npx vite build
+          fi
+
+      - name: Setup keystore for signing
+        working-directory: app
+        run: |
+          # Create keystore file from base64
+          echo "Setting up keystore..."
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > keystore.jks
+          
+          # Verify keystore was created
+          ls -la keystore.jks
+          echo "Keystore file size: $(stat -c%s keystore.jks) bytes"
+
+      - name: Build and Sign Android APK
+        working-directory: app
+        run: |
+          # 1. Clean any existing Android project
+          echo "Cleaning existing Android project..."
+          rm -rf src-tauri/gen/android
+
+          # 2. Initialize the Android project
+          echo "Initializing Android project..."
+          npx tauri android init
+
+          # 3. Setup keystore configuration in the correct location
+          echo "Setting up keystore configuration..."
+          ANDROID_APP_DIR="src-tauri/gen/android/app"
+          
+          # Create keystore.properties in the app directory
+          cat > "${ANDROID_APP_DIR}/keystore.properties" << EOF
+          storeFile=../../../../../keystore.jks
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          storePassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+          
+          echo "Contents of keystore.properties:"
+          cat "${ANDROID_APP_DIR}/keystore.properties"
+          
+          # 4. Modify the app-level build.gradle to use the keystore
+          echo "Modifying build.gradle for signing..."
+          BUILD_GRADLE="${ANDROID_APP_DIR}/build.gradle"
+          
+          # Check if signing configuration already exists
+          if ! grep -q "signingConfigs" "$BUILD_GRADLE"; then
+            # Create signing configuration file
+            echo '    def keystorePropertiesFile = rootProject.file("app/keystore.properties")' > /tmp/signing_config.txt
+            echo '    def keystoreProperties = new Properties()' >> /tmp/signing_config.txt
+            echo '    if (keystorePropertiesFile.exists()) {' >> /tmp/signing_config.txt
+            echo '        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))' >> /tmp/signing_config.txt
+            echo '    }' >> /tmp/signing_config.txt
+            echo '' >> /tmp/signing_config.txt
+            echo '    signingConfigs {' >> /tmp/signing_config.txt
+            echo '        release {' >> /tmp/signing_config.txt
+            echo '            if (keystoreProperties["keyAlias"] != null) {' >> /tmp/signing_config.txt
+            echo '                keyAlias keystoreProperties["keyAlias"]' >> /tmp/signing_config.txt
+            echo '                keyPassword keystoreProperties["keyPassword"]' >> /tmp/signing_config.txt
+            echo '                storeFile file(keystoreProperties["storeFile"])' >> /tmp/signing_config.txt
+            echo '                storePassword keystoreProperties["storePassword"]' >> /tmp/signing_config.txt
+            echo '            }' >> /tmp/signing_config.txt
+            echo '        }' >> /tmp/signing_config.txt
+            echo '    }' >> /tmp/signing_config.txt
+            
+            # Insert the signing configuration after the android { line
+            sed -i '/android {/r /tmp/signing_config.txt' "$BUILD_GRADLE"
+            
+            # Update buildTypes to use the signing config
+            sed -i '/release {/,/}/ s/}/            signingConfig signingConfigs.release\n        }/' "$BUILD_GRADLE"
+          fi
+          
+          echo "Modified build.gradle:"
+          cat "$BUILD_GRADLE"
+
+          # 5. Build the APK
+          echo "Building signed APK..."
+          npx tauri android build --apk
+
+      - name: Verify APK signature
+        working-directory: app
+        run: |
+          echo "=== VERIFYING APK SIGNATURE ==="
+          find src-tauri/gen/android -name "*.apk" -type f | while read apk; do
+            echo "Checking APK: $apk"
+            
+            # Check if APK is signed
+            if command -v jarsigner &> /dev/null; then
+              echo "Signature verification:"
+              jarsigner -verify -verbose "$apk" || echo "APK is not signed or verification failed"
+            fi
+            
+            # Use apksigner if available (more accurate for Android)
+            if command -v apksigner &> /dev/null; then
+              echo "APK Signer verification:"
+              apksigner verify "$apk" || echo "APK verification failed with apksigner"
+            fi
+            
+            # Check file size and name
+            echo "File details:"
+            ls -lh "$apk"
+            echo "---"
+          done
+
+      - name: Find and rename signed APK
+        id: find_apk
+        working-directory: app
+        run: |
+          echo "Searching for signed APK..."
+          
+          # Look for APK that is NOT unsigned
+          APK_PATH=$(find src-tauri/gen/android -name "*.apk" ! -name "*unsigned*" | head -1)
+          
+          # If no non-unsigned APK found, look for any APK
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" | head -1)
+          fi
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No APK found!"
+            exit 1
+          fi
+          
+          echo "Selected APK: $APK_PATH"
+          
+          # Check if it's signed
+          if [[ "$APK_PATH" == *"unsigned"* ]]; then
+            echo "WARNING: APK appears to be unsigned based on filename"
+          fi
+          
+          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
+          
+          echo "Copying '$APK_PATH' to '$NEW_NAME'"
+          cp "$APK_PATH" "$NEW_NAME"
+          
+          echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-android-apk-${{ github.run_id }}
+          path: app/${{ steps.find_apk.outputs.apk_path }}
+          retention-days: 7
+
+      - name: Upload debug info on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-debug-info-${{ github.run_id }}
+          path: |
+            app/src-tauri/gen/android/app/build/outputs/
+            app/src-tauri/gen/android/app/keystore.properties
+            app/src-tauri/gen/android/app/build.gradle
+            app/keystore.jks
+          retention-days: 1
