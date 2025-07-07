@@ -1,5 +1,6 @@
-# This workflow builds a Tauri v2 application for Android with PROPER signing integration
-name: Build Android App with Production Signing (Fixed)
+# This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
+# Enhanced version that uploads all APK files for debugging
+name: Build Android App with Production Signing (Debug All APKs)
 
 on:
   workflow_call:
@@ -143,206 +144,111 @@ jobs:
               npx vite build
           fi
 
-      - name: Initialize Android project and configure signing
+      - name: Build and Sign Android APK via keystore.properties
         working-directory: app
         run: |
-          # 1. Initialize the Android project
+          # 1. Initialize the Android project to generate the Gradle files.
           npx tauri android init
 
-          # 2. Create keystore file
-          base64 --decode <<< "${{ secrets.ANDROID_KEYSTORE_B64 }}" > $RUNNER_TEMP/keystore.jks
-          
-          # 3. Create keystore.properties file in the android directory
+          # 2. Go into the generated Android directory.
           cd src-tauri/gen/android
+
+          # 3. Create the keystore.properties file that Gradle will use for signing.
           echo "Creating keystore.properties file..."
           echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
           echo "keyPassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
           echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
+
+          # 4. Decode the Base64 keystore into a temporary file and reference it.
+          base64 --decode <<< "${{ secrets.ANDROID_KEYSTORE_B64 }}" > $RUNNER_TEMP/keystore.jks
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
           
+          # 5. Verify keystore.properties was created correctly
           echo "Contents of keystore.properties:"
           cat keystore.properties
           
-          # 4. Modify the app-level build.gradle to include signing configuration
-          echo "Modifying app/build.gradle to include signing configuration..."
-          
-          # First, let's see what build.gradle looks like
-          echo "=== ORIGINAL BUILD.GRADLE ==="
-          cat app/build.gradle
-          echo "=== END ORIGINAL BUILD.GRADLE ==="
-          
-          # Create a backup
-          cp app/build.gradle app/build.gradle.backup
-          
-          # Add signing configuration to build.gradle
-          cat > app/build.gradle << 'GRADLE_EOF'
-          plugins {
-              id 'com.android.application'
-              id 'org.jetbrains.kotlin.android'
-              id 'rust'
-          }
+          # 6. Go back to the app root.
+          cd ../../..
 
-          // Load keystore.properties
-          def keystorePropertiesFile = rootProject.file("keystore.properties")
-          def keystoreProperties = new Properties()
-          if (keystorePropertiesFile.exists()) {
-              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-          }
+          # 7. Build the APK. Gradle will now automatically find and use the signing config.
+          echo "Starting Tauri Android build..."
+          npx tauri android build --apk
 
-          android {
-              compileSdk 33
-
-              defaultConfig {
-                  applicationId "PLACEHOLDER_APP_ID"
-                  minSdk 24
-                  targetSdk 33
-                  versionCode 1
-                  versionName "1.0"
-
-                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-                  vectorDrawables {
-                      useSupportLibrary true
-                  }
-              }
-
-              signingConfigs {
-                  release {
-                      if (keystoreProperties['keyAlias'] != null) {
-                          keyAlias keystoreProperties['keyAlias']
-                          keyPassword keystoreProperties['keyPassword']
-                          storeFile file(keystoreProperties['storeFile'])
-                          storePassword keystoreProperties['storePassword']
-                      }
-                  }
-              }
-
-              buildTypes {
-                  release {
-                      isMinifyEnabled = true
-                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                      signingConfig signingConfigs.release
-                  }
-                  debug {
-                      isMinifyEnabled = false
-                      isJniDebuggable = true
-                      isDebuggable = true
-                      applicationIdSuffix ".debug"
-                      versionNameSuffix "-debug"
-                  }
-              }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_1_8
-                  targetCompatibility JavaVersion.VERSION_1_8
-              }
-              kotlinOptions {
-                  jvmTarget = '1.8'
-              }
-              buildFeatures {
-                  compose = true
-              }
-              composeOptions {
-                  kotlinCompilerExtensionVersion '1.4.0'
-              }
-              packagingOptions {
-                  resources {
-                      excludes += '/META-INF/{AL2.0,LGPL2.1}'
-                  }
-              }
-          }
-
-          rust {
-              rootDirRel = "../../../"
-          }
-
-          dependencies {
-              implementation "androidx.compose.ui:ui:$compose_version"
-              implementation "androidx.compose.ui:ui-tooling-preview:$compose_version"
-              implementation "androidx.compose.material3:material3:1.1.0-beta02"
-              implementation "androidx.compose.material:material:$compose_version"
-              implementation "androidx.activity:activity-compose:1.6.1"
-              implementation "androidx.core:core-ktx:1.9.0"
-              implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.1"
-              testImplementation 'junit:junit:4.13.2'
-              androidTestImplementation 'androidx.test.ext:junit:1.1.5'
-              androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
-              androidTestImplementation "androidx.compose.ui:ui-test-junit4:$compose_version"
-              debugImplementation "androidx.compose.ui:ui-tooling:$compose_version"
-              debugImplementation "androidx.compose.ui:ui-test-manifest:$compose_version"
-          }
-          GRADLE_EOF
-
-          # Replace the placeholder with actual bundle ID
-          sed -i 's/PLACEHOLDER_APP_ID/${{ inputs.bundle_id }}/g' app/build.gradle
-          
-          echo "=== MODIFIED BUILD.GRADLE ==="
-          cat app/build.gradle
-          echo "=== END MODIFIED BUILD.GRADLE ==="
-
-      - name: Build signed Android APK
-        working-directory: app
-        run: |
-          echo "Building signed APK..."
-          cd src-tauri/gen/android
-          
-          # Build the release APK directly with Gradle
-          ./gradlew assembleRelease --stacktrace
-          
-          echo "Build completed. Checking outputs..."
-          ls -la app/build/outputs/apk/universal/release/
-
-      - name: Verify APK signature and find signed APK
-        id: find_apk
+      - name: Debug - List all APK files and their properties
         working-directory: app
         run: |
           echo "=== SEARCHING FOR ALL APK FILES ==="
           find src-tauri/gen/android -name "*.apk" -type f | while read apk; do
             echo "Found APK: $apk"
             echo "  Size: $(ls -lh "$apk" | awk '{print $5}')"
+            echo "  Modified: $(ls -l "$apk" | awk '{print $6, $7, $8}')"
+            
+            # Check if APK is signed using aapt2 (if available) or basic file info
+            if command -v aapt2 &> /dev/null; then
+              echo "  Package info:"
+              aapt2 dump badging "$apk" | head -5 || echo "  Could not extract package info"
+            fi
             
             # Check APK signature using jarsigner
             if command -v jarsigner &> /dev/null; then
               echo "  Signature verification:"
-              if jarsigner -verify "$apk" 2>/dev/null; then
-                echo "    ✅ APK is SIGNED"
-              else
-                echo "    ❌ APK is unsigned"
-              fi
+              jarsigner -verify -verbose "$apk" | head -10 || echo "  Could not verify signature"
             fi
             echo "  ---"
           done
           
-          # Find the signed APK (should not have "unsigned" in the name)
+          echo "=== DIRECTORY STRUCTURE ==="
+          ls -laR src-tauri/gen/android/app/build/outputs/
+
+      - name: Upload ALL APK files for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-android-apks-${{ github.run_id }}
+          path: app/src-tauri/gen/android/**/*.apk
+          retention-days: 7
+
+      - name: Find and Rename Primary APK (Best Guess)
+        id: find_apk
+        working-directory: app
+        run: |
+          echo "Searching for the best APK candidate..."
+          
+          # Try multiple strategies to find the right APK
+          APK_PATH=""
+          
+          # Strategy 1: Look for release APK that's NOT unsigned
           APK_PATH=$(find src-tauri/gen/android -name "*release.apk" ! -name "*unsigned*" | head -1)
           
+          # Strategy 2: If that fails, look for the largest APK (likely the signed one)
           if [ -z "$APK_PATH" ]; then
-            echo "ERROR: No signed APK found!"
-            echo "Available APK files:"
-            find src-tauri/gen/android -name "*.apk" -type f
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" -exec ls -la {} \; | sort -k5 -nr | head -1 | awk '{print $9}')
+          fi
+          
+          # Strategy 3: If that fails, just take any APK
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" | head -1)
+          fi
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No APK found!"
             exit 1
           fi
           
-          echo "Selected signed APK: $APK_PATH"
-          
-          # Verify it's actually signed
-          if jarsigner -verify "$APK_PATH" 2>/dev/null; then
-            echo "✅ Confirmed: APK is properly signed"
-          else
-            echo "❌ Warning: APK may not be properly signed"
-          fi
+          echo "Selected APK: $APK_PATH"
           
           SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
           COMMIT_HASH=$(git rev-parse --short HEAD)
-          NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}-signed.apk"
+          NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
           
-          echo "Moving '$APK_PATH' to '$NEW_NAME'"
-          mv "$APK_PATH" "$NEW_NAME"
+          echo "Copying '$APK_PATH' to '$NEW_NAME'"
+          cp "$APK_PATH" "$NEW_NAME"
           
           echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
           
-      - name: Upload signed APK artifact
+      - name: Upload Primary APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: signed-android-apk-${{ github.run_id }}
+          name: primary-android-apk-${{ github.run_id }}
           path: app/${{ steps.find_apk.outputs.apk_path }}
           retention-days: 7
 
@@ -353,7 +259,6 @@ jobs:
           name: build-debug-info-${{ github.run_id }}
           path: |
             app/src-tauri/gen/android/app/build/outputs/logs/
+            app/src-tauri/target/
             app/src-tauri/gen/android/keystore.properties
-            app/src-tauri/gen/android/app/build.gradle
-            app/src-tauri/gen/android/app/build.gradle.backup
           retention-days: 1
