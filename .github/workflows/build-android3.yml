@@ -1,6 +1,6 @@
 # This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
-# It uses the direct Gradle configuration method for maximum reliability.
-name: Build Android App with Production Signing (Gradle Properties Method)
+# It uses direct Gradle command-line arguments for maximum signing reliability.
+name: Build Android App with Production Signing (Direct Gradle Args)
 
 on:
   workflow_call:
@@ -144,53 +144,45 @@ jobs:
               npx vite build
           fi
 
-      - name: Build and Sign Android APK via keystore.properties
+      - name: Build and Force-Sign Android APK via CLI Arguments
         working-directory: app
         run: |
-          # 1. Initialize the Android project to generate the Gradle files.
-          npx tauri android init
+          # 1. Decode the keystore to a predictable temporary path.
+          KEYSTORE_PATH="$RUNNER_TEMP/keystore.jks"
+          echo "Decoding keystore to $KEYSTORE_PATH"
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > $KEYSTORE_PATH
 
-          # 2. Go into the generated Android directory.
-          cd src-tauri/gen/android
-
-          # 3. Create the keystore.properties file that Gradle will use for signing.
-          echo "Creating keystore.properties file..."
-          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
-          echo "keyPassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
-          echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
-
-          # 4. Decode the Base64 keystore into a temporary file and reference it.
-          base64 --decode <<< "${{ secrets.ANDROID_KEYSTORE_B64 }}" > $RUNNER_TEMP/keystore.jks
-          echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
-          
-          # 5. Go back to the app root.
-          cd ../../..
-
-          # 6. Build the APK. Gradle will now automatically find and use the signing config.
-          echo "Starting Tauri Android build..."
-          npx tauri android build --apk
+          # 2. Build the APK, passing all signing info directly to Gradle via -P flags.
+          #    The `--` separates Tauri's arguments from the arguments for Gradle.
+          #    This is the most forceful and reliable signing method.
+          echo "Starting Tauri Android build with direct Gradle signing arguments..."
+          npx tauri android build --apk -- \
+            -Pandroid.injected.signing.store.file=$KEYSTORE_PATH \
+            -Pandroid.injected.signing.store.password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.ANDROID_KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
 
       - name: Find and Rename APK
         id: find_apk
         working-directory: app
         run: |
-          echo "Searching for signed release APK..."
-          # The signed APK name will be "*-release.apk", NOT "*-release-unsigned.apk".
-          # This `find` command is specific and robust.
+          echo "Searching for the final signed release APK..."
+          # The correctly signed APK will be named "*-release.apk" and NOT "*-release-unsigned.apk".
+          # This find command is specific and robust.
           APK_PATH=$(find src-tauri/gen/android -path "*release.apk" ! -path "*unsigned.apk" | head -1)
           
           if [ -z "$APK_PATH" ]; then
-            echo "ERROR: Signed release APK not found!"
+            echo "ERROR: The final signed release APK was not found! The build failed to produce a signed artifact."
             echo "Dumping directory structure for debugging:"
             ls -laR src-tauri/gen/android
             exit 1
           fi
           
-          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
+          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-zA-Z0-9._-]//g')
           COMMIT_HASH=$(git rev-parse --short HEAD)
           NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
           
-          echo "Moving '$APK_PATH' to '$NEW_NAME'"
+          echo "Found signed APK at '$APK_PATH'. Renaming to '$NEW_NAME'"
           mv "$APK_PATH" "$NEW_NAME"
           
           echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
