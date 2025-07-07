@@ -1,6 +1,6 @@
 # This workflow builds a Tauri v2 application for Android using a permanent, secure signing key.
-# It uses direct Gradle command-line arguments for maximum signing reliability.
-name: Build Android App with Production Signing (Direct Gradle Args)
+# Enhanced version that uploads all APK files for debugging
+name: Build Android App with Production Signing (Debug All APKs)
 
 on:
   workflow_call:
@@ -144,53 +144,111 @@ jobs:
               npx vite build
           fi
 
-      - name: Build and Force-Sign Android APK via CLI Arguments
+      - name: Build and Sign Android APK via keystore.properties
         working-directory: app
         run: |
-          # 1. Decode the keystore to a predictable temporary path.
-          KEYSTORE_PATH="$RUNNER_TEMP/keystore.jks"
-          echo "Decoding keystore to $KEYSTORE_PATH"
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > $KEYSTORE_PATH
+          # 1. Initialize the Android project to generate the Gradle files.
+          npx tauri android init
 
-          # 2. Build the APK, passing all signing info directly to Gradle via -P flags.
-          #    The `--` separates Tauri's arguments from the arguments for Gradle.
-          #    This is the most forceful and reliable signing method.
-          echo "Starting Tauri Android build with direct Gradle signing arguments..."
-          npx tauri android build --apk -- \
-            -Pandroid.injected.signing.store.file=$KEYSTORE_PATH \
-            -Pandroid.injected.signing.store.password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
-            -Pandroid.injected.signing.key.alias=${{ secrets.ANDROID_KEY_ALIAS }} \
-            -Pandroid.injected.signing.key.password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          # 2. Go into the generated Android directory.
+          cd src-tauri/gen/android
 
-      - name: Find and Rename APK
+          # 3. Create the keystore.properties file that Gradle will use for signing.
+          echo "Creating keystore.properties file..."
+          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
+          echo "keyPassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
+          echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> keystore.properties
+
+          # 4. Decode the Base64 keystore into a temporary file and reference it.
+          base64 --decode <<< "${{ secrets.ANDROID_KEYSTORE_B64 }}" > $RUNNER_TEMP/keystore.jks
+          echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
+          
+          # 5. Verify keystore.properties was created correctly
+          echo "Contents of keystore.properties:"
+          cat keystore.properties
+          
+          # 6. Go back to the app root.
+          cd ../../..
+
+          # 7. Build the APK. Gradle will now automatically find and use the signing config.
+          echo "Starting Tauri Android build..."
+          npx tauri android build --apk
+
+      - name: Debug - List all APK files and their properties
+        working-directory: app
+        run: |
+          echo "=== SEARCHING FOR ALL APK FILES ==="
+          find src-tauri/gen/android -name "*.apk" -type f | while read apk; do
+            echo "Found APK: $apk"
+            echo "  Size: $(ls -lh "$apk" | awk '{print $5}')"
+            echo "  Modified: $(ls -l "$apk" | awk '{print $6, $7, $8}')"
+            
+            # Check if APK is signed using aapt2 (if available) or basic file info
+            if command -v aapt2 &> /dev/null; then
+              echo "  Package info:"
+              aapt2 dump badging "$apk" | head -5 || echo "  Could not extract package info"
+            fi
+            
+            # Check APK signature using jarsigner
+            if command -v jarsigner &> /dev/null; then
+              echo "  Signature verification:"
+              jarsigner -verify -verbose "$apk" | head -10 || echo "  Could not verify signature"
+            fi
+            echo "  ---"
+          done
+          
+          echo "=== DIRECTORY STRUCTURE ==="
+          ls -laR src-tauri/gen/android/app/build/outputs/
+
+      - name: Upload ALL APK files for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-android-apks-${{ github.run_id }}
+          path: app/src-tauri/gen/android/**/*.apk
+          retention-days: 7
+
+      - name: Find and Rename Primary APK (Best Guess)
         id: find_apk
         working-directory: app
         run: |
-          echo "Searching for the final signed release APK..."
-          # The correctly signed APK will be named "*-release.apk" and NOT "*-release-unsigned.apk".
-          # This find command is specific and robust.
-          APK_PATH=$(find src-tauri/gen/android -path "*release.apk" ! -path "*unsigned.apk" | head -1)
+          echo "Searching for the best APK candidate..."
+          
+          # Try multiple strategies to find the right APK
+          APK_PATH=""
+          
+          # Strategy 1: Look for release APK that's NOT unsigned
+          APK_PATH=$(find src-tauri/gen/android -name "*release.apk" ! -name "*unsigned*" | head -1)
+          
+          # Strategy 2: If that fails, look for the largest APK (likely the signed one)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" -exec ls -la {} \; | sort -k5 -nr | head -1 | awk '{print $9}')
+          fi
+          
+          # Strategy 3: If that fails, just take any APK
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find src-tauri/gen/android -name "*.apk" | head -1)
+          fi
           
           if [ -z "$APK_PATH" ]; then
-            echo "ERROR: The final signed release APK was not found! The build failed to produce a signed artifact."
-            echo "Dumping directory structure for debugging:"
-            ls -laR src-tauri/gen/android
+            echo "ERROR: No APK found!"
             exit 1
           fi
           
-          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-zA-Z0-9._-]//g')
+          echo "Selected APK: $APK_PATH"
+          
+          SANITIZED_APP_NAME=$(echo "${{ inputs.app_name }}" | sed 's/[^a-zA-Z0-9._-]//g')
           COMMIT_HASH=$(git rev-parse --short HEAD)
           NEW_NAME="${SANITIZED_APP_NAME}-${COMMIT_HASH}.apk"
           
-          echo "Found signed APK at '$APK_PATH'. Renaming to '$NEW_NAME'"
-          mv "$APK_PATH" "$NEW_NAME"
+          echo "Copying '$APK_PATH' to '$NEW_NAME'"
+          cp "$APK_PATH" "$NEW_NAME"
           
           echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
           
-      - name: Upload APK artifact
+      - name: Upload Primary APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk-${{ github.run_id }}
+          name: primary-android-apk-${{ github.run_id }}
           path: app/${{ steps.find_apk.outputs.apk_path }}
           retention-days: 7
 
@@ -202,4 +260,5 @@ jobs:
           path: |
             app/src-tauri/gen/android/app/build/outputs/logs/
             app/src-tauri/target/
+            app/src-tauri/gen/android/keystore.properties
           retention-days: 1
